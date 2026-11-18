@@ -45,9 +45,16 @@ OPENING_WORDS = 16
 LEVELS = ((0.5, 16), (0.25, 8), (0.12, 4), (0.06, 2), (0.03, 1))
 OPENING_PROMPT = (
     "You are a skilled writer. Write what the user asks for as natural, flowing prose "
-    "in plain text. Name the subject within the first ten words. Output only the text "
-    "itself: no preamble, no title, no headings, no lists."
+    "in plain text. Name the subject within the first ten words. Always write at least "
+    "150 words, even when the request is a single word or a greeting: then write a "
+    "short piece inspired by it. Output only the text itself: no preamble, no title, "
+    "no headings, no lists, no questions back to the user."
 )
+# Small models sometimes answer a short request with a word or two anyway.
+_INSIST: Message = {
+    "role": "user",
+    "content": "That was too short. Write the full text now: at least 150 words of prose.",
+}
 # A word is only continued by a token at least this likely (avoids misspellings).
 WORD_PIECE_LEVEL = 0.25
 # How far, relatively, a probability may differ between writer and reader.
@@ -355,9 +362,16 @@ def _lookup(backend: Backend, written: str, first: bool = False) -> list[Option]
 
 
 def _opening(backend: Backend, messages: Sequence[Message]) -> str:
+    asked = list(messages)
     for _ in range(_OPENING_TRIES):
-        sample = flatten(backend.start(messages, _OPENING_PIECES)).strip()
+        sample = flatten(backend.start(asked, _OPENING_PIECES)).strip()
         ends = complete_word_ends(sample)
         if len(ends) >= OPENING_WORDS:
             return sample[: ends[OPENING_WORDS - 1]]
-    raise EmbedError("The model did not start writing. Check the model and try again.")
+        if sample:
+            asked = [*messages, {"role": "assistant", "content": sample}, _INSIST]
+    raise EmbedError(
+        "The model only gave a very short reply, too short to start a text. "
+        "Say more about what to write (for example: write about a trip to Turkey), "
+        "or pick a larger model."
+    )
