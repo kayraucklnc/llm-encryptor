@@ -29,12 +29,13 @@ def clipboard(monkeypatch):
     board = Clipboard()
     monkeypatch.setattr(app, "copy_text", board.copy)
     monkeypatch.setattr(app, "read_clipboard", board.read)
-    for name in (cli.PASSWORD_ENV, cli.MODEL_ENV, cli.HOST_ENV):
+    for name in (cli.PASSWORD_ENV, cli.HOST_ENV):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(cli.MODEL_ENV, "fake:1")
     return board
 
 
-def run(lines, hidden=(), stdin="", models=("fake:1", "small:2"), argv=()):
+def run(lines, hidden=(), stdin="", models=("fake:1", "small:2"), argv=(), prepare=None):
     out = io_module.StringIO()
     answers, secrets = iter(lines), iter(hidden)
     created = []
@@ -62,6 +63,8 @@ def run(lines, hidden=(), stdin="", models=("fake:1", "small:2"), argv=()):
         make_backend=make_backend,
         list_models=lambda host: list(models),
     )
+    if prepare is not None:
+        prepare(io)
     return cli.main(list(argv), io), out.getvalue(), created
 
 
@@ -110,13 +113,45 @@ def test_model_can_be_chosen_by_number_or_name(clipboard):
     assert shown.count("Model: fake:1") >= 3
 
 
-def test_no_models_is_explained(clipboard):
-    code, shown, _ = run(["3", "q"], argv=["--model", "given:1"], models=())
-    assert code == 0 and "no models yet" in shown
-    code, _, _ = run(["q"], models=())
-    assert code == 1
-    code, shown, _ = run(["q"], argv=["--model", "given:1"], models=())
-    assert code == 0 and "Model: given:1" in shown
+def test_another_model_can_be_downloaded_from_the_menu(clipboard):
+    fetched = []
+
+    def prepare(io):
+        io.fetch_model = lambda io, host, model: fetched.append(model)
+
+    # item 3 of the model list is "Download another model…"
+    lines = ["3", "3", "llama3.2:1b", "3", "3", "", "1", "s", "", "", "q"]
+    code, shown, created = run(lines, hidden=[PASSWORD, PASSWORD], prepare=prepare)
+    assert code == 0
+    assert "Download another model" in shown and "Model: llama3.2:1b" in shown
+    assert fetched == ["llama3.2:1b", "llama3.2:1b"] and created == ["llama3.2:1b"]
+
+
+def test_decrypt_tries_the_other_installed_models(clipboard):
+    """The sender used another model and the reader does not know which."""
+    seeds = {"fake:1": 1, "small:2": 2, "third:3": 3}
+
+    def prepare(io):
+        def make(model, host):
+            backend = FakeBackend(seed=seeds[model])
+            backend.model = model
+            return backend
+
+        io.make_backend = make
+
+    models = tuple(seeds)
+    run(["1", "from third", "", "", "q"], hidden=[PASSWORD, PASSWORD], argv=["--model", "third:3"], models=models, prepare=prepare)
+    code, shown, _ = run(["2", "", "q"], hidden=[PASSWORD], models=models, prepare=prepare)
+    assert code == 0
+    assert "Reading with fake:1" in shown and "Reading with third:3" in shown
+    assert "from third" in shown.split("hidden message")[1]
+
+
+def test_unreadable_text_says_what_may_be_wrong(clipboard):
+    clipboard.text = "Just some ordinary words with nothing in them at all. " * 10
+    code, shown, _ = run(["2", "", "q"], hidden=[PASSWORD])
+    assert code == 0
+    assert "written with a model that is not installed here" in shown
 
 
 def test_decrypt_from_a_file_and_from_pasted_text(clipboard, tmp_path):
@@ -135,7 +170,7 @@ def test_wrong_password_can_be_retried(clipboard):
     run(["1", "s3cret", "", "", "q"], hidden=[PASSWORD, PASSWORD])
     code, shown, _ = run(["2", "", "2", "", "q"], hidden=["wrong", PASSWORD])
     assert code == 0
-    assert "No hidden message found" in shown and "s3cret" in shown
+    assert "No hidden message found" in shown and "s3cret" in shown.split("hidden message")[-1]
 
 
 def test_empty_clipboard_and_mismatched_passwords_are_reported(clipboard):

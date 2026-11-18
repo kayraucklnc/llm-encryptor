@@ -26,6 +26,8 @@ from .terminal import (
 )
 from .words import split_words
 
+_DOWNLOAD = "Download another model…"
+_OTHER_MODELS_TRIED = 4
 DEFAULT_TOPIC = "a friendly note to a friend about how the week has been"
 _DENSITIES = {
     "natural": "natural (reads best)",
@@ -87,6 +89,7 @@ def choose(io: Io, title: str, items: list[str], start: int = 0) -> int | None:
 
 
 def _encrypt(io: Io, settings: Settings) -> Settings:
+    _need_model(io, settings, settings.model)
     secret = ask_secret(io)
     settings = _with_keys(io, settings, confirm=True)
     assert settings.keys is not None
@@ -124,24 +127,54 @@ def _decrypt(io: Io, settings: Settings) -> Settings:
     try:
         secret = reveal_with_keys(text, settings.keys)  # The robust format needs no model.
     except RevealError:
-        io.console.print(Text(f"Reading with {settings.model}…", style="dim"))
-        try:
-            secret = read_dense(text, settings.keys, io.make_backend(settings.model, settings.host))
-        except RevealError as error:
+        secret = _read_with_models(io, settings, text)
+        if secret is None:
+            io.console.print(
+                Text(
+                    "No hidden message found. The password may be wrong, the text may have been "
+                    "changed, or it was written with a model that is not installed here: ask "
+                    "the sender which one, then pick Model › Download another model.",
+                    style="red",
+                )
+            )
             # A wrong password should not stick for the next attempt.
-            io.console.print(Text(str(error), style="red"))
             return replace(settings, keys=None)
     io.console.print(Panel(Text(secret), title="hidden message", border_style="green"))
     return settings
 
 
+def _read_with_models(io: Io, settings: Settings, text: str) -> str | None:
+    """Try the chosen model, then the other installed ones (smallest first)."""
+    assert settings.keys is not None
+    _need_model(io, settings, settings.model)
+    others = [name for name in io.list_models(settings.host) if name != settings.model]
+    for model in [settings.model, *others[:_OTHER_MODELS_TRIED]]:
+        io.console.print(Text(f"Reading with {model}…", style="dim"))
+        try:
+            return read_dense(text, settings.keys, io.make_backend(model, settings.host))
+        except RevealError:
+            continue
+    return None
+
+
+def _need_model(io: Io, settings: Settings, model: str) -> None:
+    if io.fetch_model is not None:
+        io.fetch_model(io, settings.host, model)
+
+
 def _choose_model(io: Io, settings: Settings) -> Settings:
     installed = io.list_models(settings.host)
-    if not installed:
-        raise UserError("Ollama has no models yet. Get one with `ollama pull qwen2.5:0.5b`.")
     current = installed.index(settings.model) if settings.model in installed else 0
-    choice = choose(io, "Model (smallest first)", installed, current)
-    return settings if choice is None else replace(settings, model=installed[choice])
+    choice = choose(io, "Model (smallest first)", [*installed, _DOWNLOAD], current)
+    if choice is None:
+        return settings
+    if choice < len(installed):
+        return replace(settings, model=installed[choice])
+    name = io.ask("Model name, as listed on ollama.com/library (e.g. qwen3:4b): ").strip()
+    if not name:
+        return settings
+    _need_model(io, settings, name)
+    return replace(settings, model=name)
 
 
 def _switch_format(io: Io, settings: Settings) -> Settings:

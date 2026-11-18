@@ -15,9 +15,6 @@ from .backend import BackendError
 from .ollama import DEFAULT_HOST, is_running, pull_model
 from .terminal import Io, UserError
 
-# Small enough to download in a minute and to write a text in seconds.
-DEFAULT_MODEL = "qwen2.5:0.5b"
-DEFAULT_MODEL_SIZE = "about 400 MB"
 _START_SECONDS = 30
 _KNOWN_PLACES = (
     "/opt/homebrew/bin/ollama",
@@ -28,13 +25,35 @@ _INSTALL_HELP = "Install Ollama from https://ollama.com/download and run llm-enc
 
 
 def ensure_ready(io: Io, host: str) -> None:
-    """Make sure an Ollama server answers at ``host`` and has a model to use."""
-    if not is_running(host):
-        if host != DEFAULT_HOST:
-            raise UserError(f"No Ollama server answers at {host}.")
-        _start(io, _find_ollama() or _install(io))
-    if not io.list_models(host):
-        _fetch_default_model(io, host)
+    """Make sure an Ollama server answers at ``host``."""
+    if is_running(host):
+        return
+    if host != DEFAULT_HOST:
+        raise UserError(f"No Ollama server answers at {host}.")
+    _start(io, _find_ollama() or _install(io))
+
+
+def ensure_model(io: Io, host: str, model: str) -> None:
+    """Make sure ``model`` is installed, offering to download it when it is not."""
+    if _full_name(model) in {_full_name(name) for name in io.list_models(host)}:
+        return
+    if not _yes(io, f"The model {model} is not installed here. Download it now?"):
+        raise UserError(f"The model {model} is needed. You can also get it with `ollama pull {model}`.")
+    last = ""
+    try:
+        for status in pull_model(model, host):
+            if status != last:
+                io.errors.print(Text(status, style="dim"))
+                last = status
+    except BackendError as error:
+        raise UserError(
+            f"Could not download {model}: {error} Check the name at https://ollama.com/library."
+        ) from error
+
+
+def _full_name(model: str) -> str:
+    """Ollama calls a model without a tag ``name:latest``."""
+    return model if ":" in model.rsplit("/", 1)[-1] else f"{model}:latest"
 
 
 def _find_ollama() -> str | None:
@@ -73,20 +92,6 @@ def _start(io: Io, ollama: str, wait: Callable[[float], None] = time.sleep) -> N
             return
         wait(0.25)
     raise UserError(f"Ollama did not start. Its messages are in {log}.")
-
-
-def _fetch_default_model(io: Io, host: str) -> None:
-    question = f"No model is installed yet. Download the small one ({DEFAULT_MODEL}, {DEFAULT_MODEL_SIZE})?"
-    if not _yes(io, question):
-        raise UserError(f"A model is needed. Get one with `ollama pull {DEFAULT_MODEL}`.")
-    last = ""
-    try:
-        for status in pull_model(DEFAULT_MODEL, host):
-            if status != last:
-                io.errors.print(Text(status, style="dim"))
-                last = status
-    except BackendError as error:
-        raise UserError(f"The download failed: {error}") from error
 
 
 def _yes(io: Io, question: str) -> bool:

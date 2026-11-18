@@ -18,8 +18,9 @@ from .dense import DENSITIES, read_dense, write_dense
 from .embed import EmbedConfig, EmbedError
 from .hide import hide, validate_secret
 from .ollama import DEFAULT_HOST
-from .runtime import ensure_ready
+from .runtime import ensure_model, ensure_ready
 from .terminal import (
+    DEFAULT_MODEL,
     PASSWORD_ENV,
     Io,
     UserError,
@@ -38,7 +39,11 @@ __all__ = ["HOST_ENV", "MODEL_ENV", "PASSWORD_ENV", "Io", "main"]
 
 
 def main(argv: Sequence[str] | None = None, io: Io | None = None) -> int:
-    io = io or Io(prepare=ensure_ready, choose=arrow_menu if can_use_arrows() else None)
+    io = io or Io(
+        prepare=ensure_ready,
+        fetch_model=ensure_model,
+        choose=arrow_menu if can_use_arrows() else None,
+    )
     args = _parser().parse_args(argv)
     try:
         command = {"hide": _hide, "reveal": _reveal, "models": _models}.get(args.command, _menu)
@@ -56,7 +61,9 @@ def _parser() -> argparse.ArgumentParser:
     shared = argparse.ArgumentParser(add_help=False)
     # SUPPRESS keeps a value given before the command from being reset by the command's parser.
     unset = argparse.SUPPRESS
-    shared.add_argument("--model", "-m", default=unset, help=f"Ollama model to use (or ${MODEL_ENV})")
+    shared.add_argument(
+        "--model", "-m", default=unset, help=f"model to use; downloaded if missing (or ${MODEL_ENV})"
+    )
     shared.add_argument("--host", default=unset, help=f"Ollama address (or ${HOST_ENV})")
     shared.add_argument(
         "--robust",
@@ -182,12 +189,14 @@ def _installed(io: Io, host: str) -> list[str]:
 
 def _model(args: argparse.Namespace, io: Io) -> str:
     chosen = getattr(args, "model", None) or os.environ.get(MODEL_ENV)
-    return chosen or _installed(io, _host(args))[0]
+    return chosen or DEFAULT_MODEL
 
 
 def _backend(args: argparse.Namespace, io: Io, purpose: str) -> Backend:
     _prepare(args, io)
     model = _model(args, io)
+    if io.fetch_model is not None:
+        io.fetch_model(io, _host(args), model)
     io.errors.print(f"[dim]{purpose} with {escape(model)}[/dim]")
     return io.make_backend(model, _host(args))
 

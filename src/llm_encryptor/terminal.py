@@ -24,6 +24,9 @@ from .hide import validate_secret
 from .ollama import OllamaBackend, list_models
 
 PASSWORD_ENV = "LLM_ENCRYPTOR_PASSWORD"
+# The model everyone starts with, so that two people who never touched the
+# setting can read each other's texts. Small: a minute to download.
+DEFAULT_MODEL = "qwen2.5:0.5b"
 _COPY_COMMANDS = (
     ("pbcopy",),
     ("wl-copy",),
@@ -59,6 +62,8 @@ class Io:
     prepare: Callable[[Io, str], None] | None = None
     # Lets the user pick from a list with the arrow keys; None means typing a number.
     choose: Callable[[str, list[str], int], int | None] | None = None
+    # Makes sure a model is installed, offering to download it; None skips the check.
+    fetch_model: Callable[[Io, str, str], None] | None = None
 
 
 def ask_secret(io: Io) -> str:

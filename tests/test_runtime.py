@@ -62,9 +62,9 @@ def world(monkeypatch, tmp_path):
     return state
 
 
-def test_nothing_to_do_when_everything_is_ready(world):
+def test_nothing_to_do_when_the_server_is_running(world):
     world["running"] = True
-    io, asked = make_io(models=["m"])
+    io, asked = make_io()
     runtime.ensure_ready(io, DEFAULT_HOST)
     assert not asked and not world["started"] and not world["pulled"]
 
@@ -95,14 +95,20 @@ def test_declining_or_no_homebrew_explains_what_to_do(world):
     assert not world["ran"]
 
 
-def test_a_model_is_downloaded_after_asking(world):
-    world["running"] = True
-    io, asked = make_io(answers=[""])
-    runtime.ensure_ready(io, DEFAULT_HOST)
-    assert runtime.DEFAULT_MODEL in asked[0] and world["pulled"] == [runtime.DEFAULT_MODEL]
+def test_a_missing_model_is_downloaded_after_asking(world):
+    io, asked = make_io(answers=[""], models=["other:1"])
+    runtime.ensure_model(io, DEFAULT_HOST, "qwen2.5:0.5b")
+    assert "qwen2.5:0.5b is not installed here" in asked[0] and world["pulled"] == ["qwen2.5:0.5b"]
     assert io.errors.file.getvalue().count("pulling: 10%") == 1
     with pytest.raises(terminal.UserError, match="ollama pull"):
-        runtime.ensure_ready(make_io(answers=["no"])[0], DEFAULT_HOST)
+        runtime.ensure_model(make_io(answers=["no"])[0], DEFAULT_HOST, "qwen2.5:0.5b")
+
+
+def test_an_installed_model_is_left_alone(world):
+    io, asked = make_io(models=["qwen3:4b", "llama3:latest"])
+    runtime.ensure_model(io, DEFAULT_HOST, "qwen3:4b")
+    runtime.ensure_model(io, DEFAULT_HOST, "llama3")           # Ollama stores it as llama3:latest
+    assert not asked and not world["pulled"]
 
 
 def test_failures_are_explained(world, monkeypatch):
@@ -127,10 +133,9 @@ def test_failures_are_explained(world, monkeypatch):
         raise BackendError("no space left")
         yield
 
-    world["running"] = True
     monkeypatch.setattr(runtime, "pull_model", failing_pull)
     with pytest.raises(terminal.UserError, match="no space left"):
-        runtime.ensure_ready(make_io(answers=["y"])[0], DEFAULT_HOST)
+        runtime.ensure_model(make_io(answers=["y"])[0], DEFAULT_HOST, "x:1")
 
 
 # --- the Ollama calls it relies on ----------------------------------------

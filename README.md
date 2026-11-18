@@ -59,11 +59,11 @@ that runs the models:
   systems it tells you where to get it);
 - if Ollama is not running, it starts it in the background and leaves it
   running, so the next start is instant;
-- if no model is installed, it offers to download a small one
-  (`qwen2.5:0.5b`, about 400 MB).
+- if the model it needs is not installed, it offers to download it.
 
-It uses the smallest installed model unless you choose another. Small models
-are fast but write clumsier prose; `qwen3:4b` reads much better.
+Everyone starts with the same small model (`qwen2.5:0.5b`, about 400 MB), so
+two people who never touched the setting can read each other's texts. Small
+models are fast but write clumsier prose; `qwen3:4b` reads much better.
 
 ## Use
 
@@ -75,10 +75,15 @@ Run `llm-encryptor` for the menu. For scripts there are one-shot commands:
 | `llm-encryptor reveal msg.txt` | Recover the secret (or paste the text, then Ctrl-D) |
 | `llm-encryptor models` | List the models you can use |
 
-**Choosing a model.** Menu item 3, or `--model NAME` (default: the smallest
-installed model, or `$LLM_ENCRYPTOR_MODEL`). Any model Ollama runs will do.
+**Choosing a model.** Menu item 3 lists the installed models and has
+"Download another model…", where you type any name from
+[ollama.com/library](https://ollama.com/library). On the command line use
+`--model NAME` (or `$LLM_ENCRYPTOR_MODEL`); a model that is not installed is
+downloaded after asking.
+
 For compact texts both sides must use the same model, so tell your friend
-which one.
+which one if you changed it. If they don't know, Decrypt tries their chosen
+model and then up to four other installed ones, and says so when none fits.
 
 **Density.** Menu item 5 cycles through three settings, or use `--density`.
 The reader detects the density by itself.

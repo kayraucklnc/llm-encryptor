@@ -42,8 +42,9 @@ def make_io(lines=(), hidden=(), stdin="", models=("fake:1",)):
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for name in (cli.PASSWORD_ENV, cli.MODEL_ENV, cli.HOST_ENV):
+    for name in (cli.PASSWORD_ENV, cli.HOST_ENV):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(cli.MODEL_ENV, "fake:1")
 
 
 def test_hide_then_reveal(capsys):
@@ -105,10 +106,22 @@ def test_model_and_host_can_be_chosen(monkeypatch):
     assert created2 == [("env:1", "http://localhost:11434")]
 
 
-def test_no_models_is_explained():
-    io, _, err, _ = make_io(models=())
-    assert cli.main(["--robust", "hide", "-s", "x", "-a", "Write."], io) == 1
-    assert "ollama pull" in err.getvalue()
+def test_everyone_starts_with_the_same_model(monkeypatch):
+    """Two people who never chose a model must be able to read each other's texts."""
+    monkeypatch.delenv(cli.MODEL_ENV)
+    monkeypatch.setenv(cli.PASSWORD_ENV, PASSWORD)
+    io, _, _, created = make_io(models=("huge:70b", "other:1"))
+    assert cli.main(["--robust", "hide", "-s", "x", "-a", "Write."], io) == 0
+    assert created == [("qwen2.5:0.5b", "http://localhost:11434")]
+
+
+def test_a_missing_model_is_fetched_before_use(monkeypatch):
+    monkeypatch.setenv(cli.PASSWORD_ENV, PASSWORD)
+    fetched = []
+    io, _, _, _ = make_io()
+    io.fetch_model = lambda io, host, model: fetched.append((host, model))
+    assert cli.main(["--robust", "--model", "new:1", "hide", "-s", "x", "-a", "Write."], io) == 0
+    assert fetched == [("http://localhost:11434", "new:1")]
 
 
 def test_bad_temperature_is_refused(monkeypatch):
@@ -147,11 +160,12 @@ def test_compact_reveal_with_wrong_password_fails(capsys):
 def test_reveal_explains_when_no_model_can_be_reached(capsys):
     from llm_encryptor.backend import BackendError
 
-    def unreachable(host):
-        raise BackendError("Could not reach Ollama")
+    class Unreachable(FakeBackend):
+        def reset(self):
+            raise BackendError("Could not reach Ollama")
 
     io, _, err, _ = make_io(hidden=[PASSWORD], stdin="Just some ordinary words. " * 30)
-    io.list_models = unreachable
+    io.make_backend = lambda model, host: Unreachable()
     assert cli.main(["reveal"], io) == 1
     assert "compact format could not be tried" in err.getvalue()
 
