@@ -113,17 +113,17 @@ def test_silent_model_is_an_error(keys):
 
 
 def test_a_too_short_reply_is_asked_for_again(keys):
-    class ShortAtFirst(FakeBackend):
-        asked = []
+    asked = []
 
+    class ShortAtFirst(FakeBackend):
         def start(self, messages, pieces=8):
-            ShortAtFirst.asked.append(list(messages))
-            return "Hello." if len(ShortAtFirst.asked) == 1 else super().start(messages, pieces)
+            asked.append(list(messages))
+            return "Hello." if len(asked) == 1 else super().start(messages, pieces)
 
     backend = ShortAtFirst(seed=3)
     text = write_dense("hi", keys, backend, ASK)
     assert read_dense(text, keys, backend) == "hi"
-    retry = ShortAtFirst.asked[1]
+    retry = asked[1]
     assert retry[-2] == {"role": "assistant", "content": "Hello."}
     assert "too short" in retry[-1]["content"]
 
