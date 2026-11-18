@@ -48,7 +48,7 @@ Robust hides bits in a keyed hash of the words, which any computer can check.
 ## Install
 
 ```console
-$ uv tool install git+https://github.com/<you>/llm-encryptor   # or, from a checkout: uv tool install .
+$ uv tool install git+https://github.com/kayraucklnc/llm-encryptor
 $ llm-encryptor
 ```
 
