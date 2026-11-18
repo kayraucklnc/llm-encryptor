@@ -6,7 +6,7 @@ from fakes import FakeBackend
 from rich.console import Console
 
 from llm_encryptor import cli
-from llm_encryptor.codec import reveal
+from llm_encryptor.codec import RevealError, reveal
 
 PASSWORD = "correct horse battery staple"
 
@@ -231,10 +231,10 @@ def test_compact_hide_then_reveal_with_the_same_model(capsys):
     assert cli.main(["hide", "-s", "top secret", "-a", "Write about the sea."], io) == 0
     cover = capsys.readouterr().out
     assert "the model fake:1" in err.getvalue()
-    with pytest.raises(Exception):
+    with pytest.raises(RevealError):
         reveal(cover, PASSWORD)  # not readable without the model
 
-    io, _, err, created = make_io(hidden=[PASSWORD], stdin=cover)
+    io, _, err, _ = make_io(hidden=[PASSWORD], stdin=cover)
     assert cli.main(["reveal", "--model", "fake:1"], io) == 0
     assert capsys.readouterr().out.strip() == "top secret"
     assert "Reading with fake:1" in err.getvalue()
