@@ -1,4 +1,3 @@
-import dataclasses
 import io as io_module
 
 import pytest
@@ -119,110 +118,6 @@ def test_bad_temperature_is_refused(monkeypatch):
     assert "temperature" in err.getvalue()
 
 
-def test_chat_writes_revises_and_saves(tmp_path, monkeypatch):
-    first, second = tmp_path / "first.txt", tmp_path / "second.txt"
-    lines = [
-        "",                      # empty secret is asked again
-        "the eagle lands",
-        "/copy",                 # nothing to copy yet
-        "write about Turkey",
-        f"/save {first}",
-        "",
-        "make it more friendly",
-        f"/save {second}",
-        "/save",
-        "/secret",
-        "a new secret",
-        "/new",
-        "/help",
-        "/nonsense",
-        "/quit",
-    ]
-    io, out, _, _ = make_io(lines=lines, hidden=[PASSWORD, PASSWORD])
-    assert cli.main(["--robust"], io) == 0
-    assert first.read_text() != second.read_text()
-    assert reveal(first.read_text(), PASSWORD) == "the eagle lands"
-    assert reveal(second.read_text(), PASSWORD) == "the eagle lands"
-    shown = out.getvalue()
-    assert "must not be empty" in shown
-    assert "There is no text yet" in shown
-    assert "Say where to save it" in shown
-    assert "Unknown command /nonsense" in shown
-    assert "Started over" in shown
-    assert "decodes back to your secret" in shown
-
-
-def test_chat_copies_to_the_clipboard(monkeypatch):
-    copied = {}
-    monkeypatch.setattr(cli.shutil, "which", lambda name: "/bin/tool" if name == "pbcopy" else None)
-    monkeypatch.setattr(
-        cli.subprocess, "run", lambda command, input, check: copied.update(text=input.decode())
-    )
-    io, out, _, _ = make_io(lines=["s", "write", "/copy", "/quit"], hidden=[PASSWORD, PASSWORD])
-    assert cli.main(["--robust", "chat"], io) == 0
-    assert reveal(copied["text"], PASSWORD) == "s"
-    assert "Copied." in out.getvalue()
-
-
-def test_chat_without_clipboard_says_so(monkeypatch):
-    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
-    io, out, _, _ = make_io(lines=["s", "write", "/copy", "/quit"], hidden=[PASSWORD, PASSWORD])
-    assert cli.main(["--robust"], io) == 0
-    assert "No working clipboard tool" in out.getvalue()
-
-
-def test_a_failing_clipboard_tool_is_skipped(monkeypatch):
-    used = []
-
-    def run(command, input, check):
-        used.append(command[0])
-        if command[0] == "wl-copy":
-            raise cli.subprocess.CalledProcessError(1, command)
-
-    monkeypatch.setattr(cli.shutil, "which", lambda name: name if name in ("wl-copy", "xclip") else None)
-    monkeypatch.setattr(cli.subprocess, "run", run)
-    io, out, _, _ = make_io(lines=["s", "write", "/copy", "/quit"], hidden=[PASSWORD, PASSWORD])
-    assert cli.main(["--robust"], io) == 0
-    assert used == ["wl-copy", "xclip"]
-    assert "Copied." in out.getvalue()
-
-
-def test_text_with_square_brackets_is_shown_as_written(monkeypatch):
-    monkeypatch.setattr(cli.Session, "instruct", lambda self, line, on_progress: dataclasses.replace(self, cover="see [/b] and [note] here"))
-    io, out, _, _ = make_io(lines=["s", "write", "/weird[/x]", "/quit"], hidden=[PASSWORD, PASSWORD])
-    assert cli.main(["--robust"], io) == 0
-    assert "see [/b] and [note] here" in out.getvalue()
-    assert "Unknown command /weird[/x]" in out.getvalue()
-
-
-def test_interrupting_the_writing_returns_to_the_prompt(monkeypatch):
-    def interrupted(self, line, on_progress):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(cli.Session, "instruct", interrupted)
-    io, out, _, _ = make_io(lines=["s", "write", "/quit"], hidden=[PASSWORD, PASSWORD])
-    assert cli.main(["--robust"], io) == 0
-    assert "Stopped." in out.getvalue()
-
-
-def test_chat_survives_a_model_failure(monkeypatch):
-    from llm_encryptor.backend import BackendError
-
-    class Broken:
-        def start(self, messages, pieces=8):
-            raise BackendError("Could not reach Ollama")
-
-    io, out, _, _ = make_io(lines=["s", "write", "/quit"], hidden=[PASSWORD, PASSWORD])
-    io.make_backend = lambda model, host: Broken()
-    assert cli.main(["--robust"], io) == 0
-    assert "Could not reach Ollama" in out.getvalue()
-
-
-def test_end_of_input_leaves_quietly():
-    io, _, _, _ = make_io(lines=["s"], hidden=[PASSWORD, PASSWORD])
-    assert cli.main(["--robust"], io) == 130
-
-
 # --- compact format (the default) ----------------------------------------
 
 
@@ -268,17 +163,3 @@ def test_models_are_listed():
     io, _, err, _ = make_io(models=())
     assert cli.main(["models"], io) == 1
     assert "ollama pull" in err.getvalue()
-
-
-def test_chat_switches_model_and_mode(tmp_path):
-    compact, robust = tmp_path / "compact.txt", tmp_path / "robust.txt"
-    lines = ["s", "/models", "/model", "/model other:2", "write", f"/save {compact}",
-             "/mode", "/mode robust", "write", f"/save {robust}", "/quit"]
-    io, out, _, created = make_io(lines=lines, hidden=[PASSWORD, PASSWORD])
-    assert cli.main([], io) == 0
-    shown = out.getvalue()
-    assert created == [("fake:1", "http://localhost:11434"), ("other:2", "http://localhost:11434")]
-    assert "Say which model" in shown and "Choose one" in shown and "fake:1" in shown
-    assert "No model needed" in shown
-    assert reveal(robust.read_text(), PASSWORD) == "s"
-    assert len(compact.read_text().split()) < len(robust.read_text().split())

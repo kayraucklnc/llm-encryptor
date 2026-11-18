@@ -81,8 +81,8 @@ class SecretBox:
             return None
 
 
-DENSE_SALT_LEN = 4
-DENSE_TAG_LEN = 6
+DENSE_SALT_LEN = 2
+DENSE_TAG_LEN = 4
 DENSE_OVERHEAD = DENSE_SALT_LEN + DENSE_TAG_LEN
 _DENSE_NONCE_LEN = 13
 _DENSE_LABEL = b"llm-encryptor/dense/v1\x00"
@@ -91,11 +91,12 @@ _DENSE_LABEL = b"llm-encryptor/dense/v1\x00"
 class DenseBox:
     """Sealing for the compact format, where every bit of overhead shows.
 
-    Only four random bytes travel with the message. The rest of the nonce is
+    Only two random bytes travel with the message. The rest of the nonce is
     a hash of the text's opening words, which the reader sees anyway, so two
     messages share a nonce only if both the opening and those bytes repeat.
-    The tag is six bytes: enough to tell a real message from noise even when
-    the reader has to try a few thousand readings of the text.
+    The tag is four bytes: it tells a real message from noise (a reader that
+    tries a thousand readings of a text is fooled about once in 100,000
+    texts), but it is too short to stop a determined forger.
     """
 
     def __init__(self, dense_key: bytes) -> None:

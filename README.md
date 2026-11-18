@@ -2,37 +2,43 @@
 
 Hide an encrypted message inside ordinary-looking text written by a local LLM.
 
-You give it a secret and a password, then chat with a model: "write about
-Turkey", "make it friendlier". Every version of the text carries the same
-secret. Your friend pastes the text into `llm-encryptor reveal`, types the
-password, and gets the secret back.
+Run it, pick Encrypt, type your secret and what the text should be about. The
+text lands on your clipboard. Your friend picks Decrypt, and gets the secret
+back with the password.
 
 ```console
 $ llm-encryptor
+╭─ llm-encryptor ──────────────────────────────────────────────╮
+│ 1  Encrypt a message                                         │
+│ 2  Decrypt a message                                         │
+│ 3  Model: qwen3:4b                                           │
+│ 4  Format: compact (short text; the reader needs the same …) │
+│ 5  Change password                                           │
+│ q  Quit                                                      │
+╰──────────────────────────────────────────────────────────────╯
+> 1
 Secret to hide: meet at noon
 Password (the reader needs the same one):
-you › write about Turkey
+What should the text be about? (Enter for a friendly note) write about Turkey
 ╭─ text to send ───────────────────────────────────────────────╮
-│ Picture this: the morning sun spills over the Bosphorus, …   │
+│ Turkey stretches across two continents, a land where …       │
 ╰──────────────────────────────────────────────────────────────╯
-✓ 213 words · checked: it decodes back to your secret
-To read it: the password and the model qwen3:4b
-you › make it more friendly and casual
-…
-you › /copy
-
-$ llm-encryptor reveal message.txt --model qwen3:4b
-Password (the reader needs the same one):
-meet at noon
+✓ 107 words · copied to your clipboard
+To read it: the password and the model qwen3:4b.
+Ask for a change (e.g. make it friendlier), or Enter when done:
 ```
+
+Decrypt reads the text from your clipboard (or a file, or pasted text). The
+password is asked once and kept until you close the app.
 
 ## Two formats
 
-| | Compact (default) | Robust (`--robust`, `/mode robust`) |
+| | Compact (default) | Robust (menu item 4, or `--robust`) |
 |---|---|---|
-| Text for a 12-character secret | about 170–220 words | at least 337 words |
+| Text for a 12-character secret | about 90–165 words | at least 337 words |
 | Time to write (4B model, laptop) | about 20 s | one to two minutes |
 | The reader needs | password + the same model | password only |
+| Each extra character costs | 3 to 4 words | 12 words |
 | Survives | changed spacing and line breaks | also changed case and punctuation marks |
 
 Compact packs the bits into the model's own word choices, so it is as dense
@@ -51,28 +57,40 @@ $ uv sync && uv run llm-encryptor        # from a checkout
 
 ## Use
 
+Run `llm-encryptor` for the menu. For scripts there are one-shot commands:
+
 | Command | What it does |
 |---|---|
-| `llm-encryptor` | Chat: write a cover text and keep revising it |
 | `llm-encryptor hide -a "write about Turkey" -o msg.txt` | Hide a secret in one go |
 | `llm-encryptor reveal msg.txt` | Recover the secret (or paste the text, then Ctrl-D) |
 | `llm-encryptor models` | List the models you can use |
 
-In the chat: `/model NAME`, `/models`, `/mode compact|robust`, `/copy`,
-`/save FILE`, `/secret` (hide something else), `/new`, `/quit`.
+**Choosing a model.** Menu item 3, or `--model NAME` (default: the first model
+Ollama lists, or `$LLM_ENCRYPTOR_MODEL`). Any model Ollama runs will do. Small
+ones are faster: `qwen2.5:0.5b` writes a text in a few seconds, but its prose
+is clumsier. For compact texts both sides must use the same model, so tell
+your friend which one.
 
-**Choosing a model.** `--model NAME` works for writing and for reading
-(default: the first model Ollama lists, or `$LLM_ENCRYPTOR_MODEL`). Any model
-Ollama runs will do. Small ones are faster: `qwen2.5:0.5b` writes a text in
-about 9 s and reads it in 2 s, but its prose is clumsier. For compact texts
-both sides must use the same model, so tell your friend which one.
+Other options: `--robust`, `--host URL` (or `$OLLAMA_HOST`); the password can
+come from `$LLM_ENCRYPTOR_PASSWORD` for scripts. `hide --secret "…"` puts the
+secret in your shell history; leave it out and the app asks instead.
 
-Other options: `--host URL` (or `$OLLAMA_HOST`); the password can come from
-`$LLM_ENCRYPTOR_PASSWORD` for scripts. `hide --secret "…"` puts the secret in
-your shell history; leave it out and the app asks instead.
+## How short can it get?
 
-**Use `/copy` or `/save`** rather than selecting the text in the terminal:
-the box drawn around it would come along.
+A text can carry about as many bits as the model has real choices: with
+`qwen3:4b` that is roughly 1.4 bits a word. So the length is set by how many
+bits must be hidden. For "meet at noon" in the compact format:
+
+| What | Bits |
+|---|---|
+| The secret, packed (a fixed code: common letters take 3–5 bits) | 56 |
+| Random bytes so the same secret never encrypts the same way twice | 16 |
+| Tag that tells a real message from noise | 32 |
+
+That is 104 bits, about 75 words, plus 16 free opening words and the words
+needed to finish the last sentence. Getting much below that would mean giving
+up the tag (then a wrong password returns garbage instead of an error) or
+letting the text read less naturally.
 
 ## How it works
 
@@ -88,7 +106,7 @@ the current interval according to their probability, and the token whose share
 contains the point is written. The reader replays the model over the text,
 follows the same intervals and reads the bits off the final one.
 
-- The first 24 words are written freely to your instructions and carry
+- The first 16 words are written freely to your instructions and carry
   nothing. They set topic and tone; the coded part continues them. That is why
   the reader needs no prompt, and why revising works. It also means the text
   can drift from your instructions later on.
@@ -96,7 +114,8 @@ follows the same intervals and reads the bits off the final one.
   level boundary the reader tries both sides (the encryption tag tells which
   is right). Writer and reader both start from a freshly loaded model, because
   what the server has cached changes its numbers slightly.
-- Overhead is 10 bytes: 4 random bytes and a 6-byte tag. The rest of the nonce
+- The secret is packed with a fixed Huffman code before it is encrypted.
+  Overhead is 6 bytes: 2 random bytes and a 4-byte tag. The rest of the nonce
   is a hash of the opening words.
 
 **Robust.** The text is split into blocks of three words; HMAC-SHA256 of each
@@ -134,8 +153,11 @@ breaks, so "smart quotes" or autocorrect on the way will break it.
   Ollama version may compute slightly different probabilities; the reader
   tolerates small differences, but this is untested. If your friend cannot
   read a compact text, use `--robust`.
-- **Compact uses a short tag (6 bytes)** to save words. That is plenty to tell
-  a message from noise, less than usual against deliberate forgery.
+- **Compact uses a short tag (4 bytes) and 2 random bytes** to save words.
+  The tag tells a message from noise but would not stop a determined forger.
+  Two compact texts with the same password, the same first 16 words and the
+  same 2 random bytes would leak how their secrets differ; that needs a
+  1-in-65,536 coincidence on top of an identical opening.
 - Not audited. Do not rely on it where being caught has serious consequences.
 
 ## Other runtimes

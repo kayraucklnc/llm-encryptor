@@ -11,14 +11,17 @@ from llm_encryptor.dense import (
     WOBBLE,
     DenseError,
     _Interval,
+    _other_share,
     flatten,
     options,
     read_dense,
+    shares,
     split_opening,
     write_dense,
 )
 from llm_encryptor.embed import EmbedError, Progress
 from llm_encryptor.session import Session
+from llm_encryptor.textcode import pack
 
 ASK = [{"role": "user", "content": "Write about the sea."}]
 
@@ -67,7 +70,7 @@ def test_too_short_a_text_is_refused(keys):
 def test_progress_reaches_the_whole_payload(keys):
     seen: list[Progress] = []
     write_dense("hi", keys, FakeBackend(seed=7), ASK, on_progress=seen.append)
-    assert seen[-1].embedded == seen[-1].total == 8 * (2 + DENSE_OVERHEAD)
+    assert seen[-1].embedded == seen[-1].total == 8 * (len(pack("hi")) + DENSE_OVERHEAD)
 
 
 def test_writer_tries_again_when_its_text_does_not_read_back(keys):
@@ -127,7 +130,7 @@ def test_a_probability_near_a_level_is_read_both_ways(keys):
 
         def next_tokens(self, messages, prefix):
             choices = super().next_tokens(messages, prefix)
-            if len(prefix) % 29:
+            if len(prefix.split()) != OPENING_WORDS + 2:
                 return choices
             return [Choice(c.text, boundary + self.shift if c.probability == 0.25 else c.probability) for c in choices]
 
@@ -145,8 +148,6 @@ def test_compact_session_revises_and_is_shorter(keys):
     assert read_dense(revised.cover, keys, backend) == "meet at noon"
     assert compact.cover != revised.cover
     assert len(compact.cover.split()) < len(robust.cover.split())
-    assert compact.with_mode(False).compact is False
-    assert compact.with_backend(FakeBackend(seed=12)).backend is not backend
 
 
 # --- pieces ---------------------------------------------------------------
@@ -172,26 +173,27 @@ def test_options_are_sorted_and_cannot_be_confused():
 
 def test_shares_follow_the_levels():
     choices = [Choice(" a", 0.7), Choice(" b", 0.2), Choice(" c", 0.07), Choice(" d", 0.01)]
-    assert [option.share for option in options(choices, "x.")] == [16, 4, 2, 0]
+    assert shares(options(choices, "x.")) == [16, 4, 2, 0]
 
 
 def test_a_word_is_only_finished_the_likely_way():
     choices = [Choice("ly", 0.2), Choice("ship", 0.6), Choice(" and", 0.2)]
-    shares = {option.token: option.share for option in options(choices, "friend")}
-    assert shares == {" and": 4, "ly": 0, "ship": 16}
+    found = options(choices, "friend")
+    assert dict(zip((o.token for o in found), shares(found))) == {" and": 4, "ly": 0, "ship": 16}
     assert [o.token for o in options(choices, "friend", first=True)] == [" and"]
 
 
 def test_borderline_probabilities_are_flagged():
     edge = LEVELS[-1][0]
     choices = [Choice(" a", edge * (1 + WOBBLE / 2)), Choice(" b", edge * (1 - WOBBLE / 2)), Choice(" c", 0.9)]
-    found = {option.token: (option.share, option.other) for option in options(choices, "x.")}
-    assert found == {" a": (1, 0), " b": (0, 1), " c": (16, None)}
+    found = options(choices, "x.")
+    assert shares(found) == [1, 0, 16]
+    assert [_other_share(option) for option in found] == [0, 1, None]
 
 
 def test_the_likeliest_token_gets_through_when_none_stands_out():
     choices = [Choice(f" w{i}", 0.01 + i / 1000) for i in range(5)]
-    assert [option.share for option in options(choices, "x.")] == [0, 0, 0, 0, 1]
+    assert shares(options(choices, "x.")) == [0, 0, 0, 0, 1]
 
 
 def test_interval_bits():

@@ -34,12 +34,20 @@ from .backend import Backend, Choice, Message
 from .codec import RevealError
 from .crypto import DENSE_OVERHEAD, MAX_SECRET_BYTES, DenseBox, Keys
 from .embed import EmbedError, Progress, ProgressCallback
+from .textcode import pack, unpack
 from .words import complete_word_ends, is_word_char
 
 # All of these are part of the format: sender and reader must agree on them.
-OPENING_WORDS = 24
+OPENING_WORDS = 16
 # A token's share of the interval, by its probability: (at least, shares).
+# Flatter shares were tried and did not shorten the text: this model usually
+# has one clear favourite, so there is little to flatten.
 LEVELS = ((0.5, 16), (0.25, 8), (0.12, 4), (0.06, 2), (0.03, 1))
+OPENING_PROMPT = (
+    "You are a skilled writer. Write what the user asks for as natural, flowing prose "
+    "in plain text. Name the subject within the first ten words. Output only the text "
+    "itself: no preamble, no title, no headings, no lists."
+)
 # A word is only continued by a token at least this likely (avoids misspellings).
 WORD_PIECE_LEVEL = 0.25
 # How far, relatively, a probability may differ between writer and reader.
@@ -59,10 +67,10 @@ _OPENING_TRIES = 5
 _LOOKUP_TRIES = 3
 _WRITE_TRIES = 3
 _PADDING_BITS = 8192
-_MAX_BITS = 8 * (DENSE_OVERHEAD + MAX_SECRET_BYTES)
+_MAX_BITS = 8 * (DENSE_OVERHEAD + MAX_SECRET_BYTES + 1)
 _TOKENS_PER_BIT = 8
 _TAIL_TOKENS = 60
-_MAX_READINGS = 4000
+_MAX_READINGS = 1000
 _MAX_DOUBTS_FLIPPED = 4
 _SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*$")
 _SPACE = re.compile(r"\s+")
@@ -110,12 +118,12 @@ def split_opening(text: str) -> tuple[str, str]:
 
 @dataclass(frozen=True)
 class Option:
-    """A token that may come next, its share, and the share it would get if
-    its probability were just on the other side of a nearby level boundary."""
+    """A token that may come next. ``extends_word`` marks a piece that would
+    continue the word being written."""
 
     token: str
-    share: int
-    other: int | None = None
+    probability: float
+    extends_word: bool = False
 
 
 def _share(probability: float, extends_word: bool) -> int:
@@ -128,7 +136,7 @@ def _share(probability: float, extends_word: bool) -> int:
 
 
 def options(choices: Sequence[Choice], written: str, first: bool = False) -> list[Option]:
-    """Which tokens may come next and how the interval is shared among them.
+    """Which tokens may come next, in a fixed order.
 
     Deterministic, because sender and reader must get the same answer. No
     token may read as the start of another once spacing is flattened;
@@ -144,40 +152,47 @@ def options(choices: Sequence[Choice], written: str, first: bool = False) -> lis
         if choice.probability > 0 and choice.text.strip() and "\ufffd" not in choice.text
         and not (first and is_word_char(choice.text[0]))
     )
-    kept: list[tuple[str, str, float]] = []
+    kept: list[Option] = []
+    keys: list[str] = []
     for key, token, probability in keyed:
-        if key.rstrip() == seen.rstrip() or any(key.startswith(other) for other, _, _ in kept):
+        if key.rstrip() == seen.rstrip() or any(key.startswith(other) for other in keys):
             continue
-        kept.append((key, token, probability))
+        keys.append(key)
+        kept.append(Option(token, probability, mid_word and is_word_char(token[0])))
+    return kept
 
-    result = []
-    for _, token, probability in kept:
-        extends = mid_word and is_word_char(token[0])
-        share = _share(probability, extends)
-        nearby = {
-            _share(probability * (1 - WOBBLE), extends),
-            _share(probability * (1 + WOBBLE), extends),
-        }
-        other = next(iter(nearby - {share}), None)
-        result.append(Option(token, share, other))
-    if not any(option.share for option in result) and kept:
+
+def shares(found: Sequence[Option]) -> list[int]:
+    """How the interval is shared among the options."""
+    result = [_share(o.probability, o.extends_word) for o in found]
+    if found and not any(result):
         # Nothing stands out: let the likeliest token through.
-        best = max(range(len(kept)), key=lambda i: (kept[i][2], kept[i][1]))
-        result[best] = Option(result[best].token, 1, result[best].other)
+        best = max(range(len(found)), key=lambda i: (found[i].probability, found[i].token))
+        result[best] = 1
     return result
+
+
+def _other_share(option: Option) -> int | None:
+    """The share this option would get just across a nearby level boundary."""
+    here = _share(option.probability, option.extends_word)
+    nearby = {
+        _share(option.probability * (1 - WOBBLE), option.extends_word),
+        _share(option.probability * (1 + WOBBLE), option.extends_word),
+    }
+    return next(iter(nearby - {here}), None)
 
 
 def write_dense(
     secret: str,
     keys: Keys,
     backend: Backend,
-    opening_messages: Sequence[Message],
+    conversation: Sequence[Message],
     on_progress: ProgressCallback | None = None,
     rng: random.Random | None = None,
 ) -> str:
-    """A text that opens as ``opening_messages`` ask and carries ``secret``."""
+    """A text that opens as ``conversation`` asks and carries ``secret``."""
     rng = rng or random.SystemRandom()
-    opening = _opening(backend, opening_messages)
+    opening = _opening(backend, [{"role": "system", "content": OPENING_PROMPT}, *conversation])
     # What a model server has cached changes its numbers slightly. Writer and
     # reader therefore both start from a freshly loaded model, and every text
     # is read back before it is returned, and written again if that fails.
@@ -200,7 +215,7 @@ def _code(
     rng: random.Random,
 ) -> str:
     notify = on_progress or (lambda _progress: None)
-    payload = DenseBox(keys.dense).seal(secret.encode("utf-8"), text)
+    payload = DenseBox(keys.dense).seal(pack(secret), text)
     wanted = 8 * len(payload)
     # The point to home in on: the payload, then random digits so that the
     # words after the payload are still sampled the way the model would.
@@ -211,7 +226,8 @@ def _code(
     done_at: int | None = None
     backend.reset()
     for step in range(_TOKENS_PER_BIT * wanted + _TAIL_TOKENS):
-        choices = [(o.token, o.share) for o in _lookup(backend, text, first=step == 0) if o.share]
+        found = _lookup(backend, text, first=step == 0)
+        choices = [(o.token, share) for o, share in zip(found, shares(found)) if share]
         if not choices:
             break
         total = sum(count for _, count in choices)
@@ -261,8 +277,8 @@ def read_dense(text: str, keys: Keys, backend: Backend) -> str:
         written += token
 
     box = DenseBox(keys.dense)
-    for shares in _readings(steps):
-        secret = _open(box, _bits(steps, shares), opening)
+    for reading in _readings(steps):
+        secret = _open(box, _bits(steps, reading), opening)
         if secret is not None:
             return secret
     raise DenseError(
@@ -277,31 +293,32 @@ def _readings(steps: Sequence[tuple[list[Option], int]]):
     A token that was written must have had a share, so a written token we see
     below the lowest level is moved up without counting as a doubt.
     """
-    base = [[option.share for option in found] for found, _ in steps]
+    base = [shares(found) for found, _ in steps]
     doubts = []
     for at, (found, chosen) in enumerate(steps):
         for i, option in enumerate(found):
-            if option.other is None:
+            other = _other_share(option)
+            if other is None:
                 continue
-            if i == chosen and option.share == 0:
-                base[at][i] = option.other
-            elif not (i == chosen and option.other == 0):
-                doubts.append((at, i, option.other))
+            if i == chosen and base[at][i] == 0:
+                base[at][i] = other
+            elif not (i == chosen and other == 0):
+                doubts.append((at, i, other))
     tried = 0
     for size in range(min(_MAX_DOUBTS_FLIPPED, len(doubts)) + 1):
         for flipped in itertools.combinations(doubts, size):
             if tried >= _MAX_READINGS:
                 return
             tried += 1
-            shares = [list(row) for row in base]
+            reading = [list(row) for row in base]
             for at, i, other in flipped:
-                shares[at][i] = other
-            yield shares
+                reading[at][i] = other
+            yield reading
 
 
-def _bits(steps: Sequence[tuple[list[Option], int]], shares: Sequence[Sequence[int]]) -> bytes:
+def _bits(steps: Sequence[tuple[list[Option], int]], reading: Sequence[Sequence[int]]) -> bytes:
     interval = _Interval()
-    for (_, chosen), row in zip(steps, shares):
+    for (_, chosen), row in zip(steps, reading):
         if row[chosen] == 0:
             break
         interval = interval.narrowed(sum(row[:chosen]), row[chosen], sum(row))
@@ -317,8 +334,8 @@ def _open(box: DenseBox, blob: bytes, opening: str) -> str | None:
         plaintext = box.open(blob[:length], opening)
         if plaintext is not None:
             try:
-                return plaintext.decode("utf-8")
-            except UnicodeDecodeError:
+                return unpack(plaintext)
+            except ValueError:
                 continue
     return None
 

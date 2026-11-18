@@ -1,4 +1,3 @@
-import pytest
 from fakes import FakeBackend
 
 from llm_encryptor.codec import reveal_with_keys
@@ -35,17 +34,3 @@ def test_sessions_are_not_changed_in_place(keys):
     session.instruct("Write about Turkey.")
     assert session.cover is None
     assert session.conversation == ()
-
-
-def test_secret_can_be_replaced(keys):
-    session = Session("hi", keys, FakeBackend(seed=4), compact=False).with_secret("new secret")
-    assert reveal_with_keys(session.instruct("Write.").cover, keys) == "new secret"
-    with pytest.raises(ValueError):
-        session.with_secret("")
-
-
-def test_restart_forgets_the_conversation(keys):
-    session = Session("hi", keys, FakeBackend(seed=5), compact=False).instruct("Write.").restarted()
-    assert session.conversation == ()
-    assert session.cover is None
-    assert session.secret == "hi"
