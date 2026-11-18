@@ -66,11 +66,11 @@ def run(lines, hidden=(), stdin="", models=("fake:1", "small:2"), argv=()):
 
 
 def test_menu_is_shown_and_quits(clipboard):
-    code, shown, _ = run(["x", "q"])
+    code, shown, _ = run(["x", "7"])
     assert code == 0
     assert "1  Encrypt a message" in shown and "2  Decrypt a message" in shown
-    assert "Model: fake:1" in shown and "Format: compact" in shown
-    assert "Type 1, 2, 3, 4, 5 or q." in shown
+    assert "Model: fake:1" in shown and "Format: compact" in shown and "7  Quit" in shown
+    assert "Type a number from 1 to 7, or q." in shown
 
 
 def test_encrypt_copies_and_decrypt_reads_the_clipboard(clipboard):
@@ -104,14 +104,15 @@ def test_robust_format_can_be_read_without_a_model(clipboard):
 
 
 def test_model_can_be_chosen_by_number_or_name(clipboard):
-    code, shown, created = run(["3", "2", "1", "s", "", "", "3", "fake:1", "3", "9", "q"], hidden=[PASSWORD, PASSWORD])
+    code, shown, created = run(["3", "2", "1", "s", "", "", "3", "1", "3", "q", "q"], hidden=[PASSWORD, PASSWORD])
     assert code == 0
     assert "Model: small:2" in shown and created == ["small:2"]
-    assert shown.count("Model: fake:1") >= 2
-    assert "not one of the models" in shown
+    assert shown.count("Model: fake:1") >= 3
 
 
 def test_no_models_is_explained(clipboard):
+    code, shown, _ = run(["3", "q"], argv=["--model", "given:1"], models=())
+    assert code == 0 and "no models yet" in shown
     code, _, _ = run(["q"], models=())
     assert code == 1
     code, shown, _ = run(["q"], argv=["--model", "given:1"], models=())
@@ -139,14 +140,14 @@ def test_wrong_password_can_be_retried(clipboard):
 
 def test_empty_clipboard_and_mismatched_passwords_are_reported(clipboard):
     clipboard.text = "  "
-    code, shown, _ = run(["2", "", "5", "1", "s", "q"], hidden=["one", "two", "a", "b"])
+    code, shown, _ = run(["2", "", "6", "1", "s", "q"], hidden=["one", "two", "a", "b"])
     assert code == 0
     assert "There is no text to read" in shown
     assert shown.count("The two passwords are different") == 2
 
 
 def test_password_is_asked_once_and_can_be_changed(clipboard):
-    lines = ["1", "first", "", "", "1", "second", "", "", "5", "2", "", "q"]
+    lines = ["1", "first", "", "", "1", "second", "", "", "6", "2", "", "q"]
     code, shown, _ = run(lines, hidden=[PASSWORD, PASSWORD, "new one", "new one"])
     assert code == 0
     assert "No hidden message found" in shown  # the text was written with the old password
@@ -202,3 +203,75 @@ def test_copy_and_paste_use_the_first_working_tool(monkeypatch):
     monkeypatch.setattr(terminal.shutil, "which", lambda name: None)
     assert terminal.copy_text("hello") is False
     assert terminal.read_clipboard() is None
+
+
+def test_density_can_be_switched_for_compact_only(clipboard):
+    code, shown, _ = run(["5", "1", "a rather long secret message", "", "", "2", "", "4", "5", "q"], hidden=[PASSWORD, PASSWORD])
+    assert code == 0
+    assert "Density: tight" in shown and "a rather long secret message" in shown.split("hidden message")[1]
+    assert "only applies to the compact format" in shown
+
+
+# --- arrow-key menu -------------------------------------------------------
+
+
+def _press(*keys):
+    presses = iter(keys)
+    return lambda: next(presses, b"")
+
+
+def test_arrows_move_and_enter_chooses():
+    drawn = []
+    items = ["Encrypt", "Decrypt", "Quit"]
+    assert terminal.pick("menu", items, 0, _press(b"\x1b[B", b"\x1b[B", b"\x1b[A", b"\r"), drawn.append) == 1
+    assert "❯ 1  Encrypt" in drawn[0] and "❯ 2  Decrypt" in drawn[-1]
+    assert drawn[1].startswith("\x1b[4A")  # redrawn in place, not appended
+    assert terminal.pick("menu", items, 0, _press(b"\x1b[A", b"\n"), drawn.append) == 2  # wraps around
+    assert terminal.pick("menu", items, 1, _press(b"j", b"k", b"k", b"\r"), drawn.append) == 0
+
+
+def test_digits_jump_and_q_or_escape_leave():
+    items = ["a", "b", "c"]
+    assert terminal.pick("m", items, 0, _press(b"3"), lambda text: None) == 2
+    assert terminal.pick("m", items, 0, _press(b"9", b"x", b"2"), lambda text: None) == 1
+    assert terminal.pick("m", items, 0, _press(b"q"), lambda text: None) is None
+    assert terminal.pick("m", items, 0, _press(b"\x1b"), lambda text: None) is None
+
+
+def test_ctrl_c_and_closed_input_are_passed_on():
+    with pytest.raises(KeyboardInterrupt):
+        terminal.pick("m", ["a"], 0, _press(b"\x03"), lambda text: None)
+    with pytest.raises(EOFError):
+        terminal.pick("m", ["a"], 0, _press(), lambda text: None)
+
+
+def test_long_items_are_cut_to_the_window():
+    drawn = []
+    terminal.pick("m", ["x" * 200], 0, _press(b"\r"), drawn.append, width=30)
+    assert "x" * 30 not in drawn[0]
+
+
+def test_app_uses_the_arrow_menu_when_there_is_one(clipboard):
+    picks = iter([3, 2, 1, 6])  # format, model -> second, then quit
+    seen = []
+
+    def choose(title, items, start):
+        seen.append((title, list(items), start))
+        return next(picks)
+
+    out = io_module.StringIO()
+    io = terminal.Io(
+        console=Console(file=out, width=200, force_terminal=False),
+        errors=Console(file=io_module.StringIO()),
+        list_models=lambda host: ["fake:1", "small:2"],
+        choose=choose,
+    )
+    assert cli.main(["--model", "fake:1"], io) == 0
+    assert [title for title, _, _ in seen] == ["llm-encryptor", "llm-encryptor", "Model (smallest first)", "llm-encryptor"]
+    assert "Format: robust" in seen[1][1][3] and seen[1][2] == 3   # the cursor stays where it was
+    assert "Model: small:2" in seen[3][1][2]
+
+
+def test_arrows_need_a_real_terminal(monkeypatch):
+    monkeypatch.setattr(terminal.sys.stdin, "isatty", lambda: False, raising=False)
+    assert terminal.can_use_arrows() is False

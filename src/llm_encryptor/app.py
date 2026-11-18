@@ -27,6 +27,10 @@ from .terminal import (
 from .words import split_words
 
 DEFAULT_TOPIC = "a friendly note to a friend about how the week has been"
+_DENSITIES = {
+    False: "natural (reads best)",
+    True: "tight (fewer words for longer secrets; reads less smoothly)",
+}
 _FORMATS = {
     True: "compact (short text; the reader needs the same model)",
     False: "robust (about three times longer; the reader needs no model)",
@@ -38,38 +42,47 @@ class Settings:
     host: str
     model: str
     compact: bool = True
+    tight: bool = False
     keys: Keys | None = None
 
 
 def run_app(io: Io, settings: Settings) -> None:
+    at = 0
     while True:
-        io.console.print(
-            Panel(
-                Text(
-                    "1  Encrypt a message\n"
-                    "2  Decrypt a message\n"
-                    f"3  Model: {settings.model}\n"
-                    f"4  Format: {_FORMATS[settings.compact]}\n"
-                    "5  Change password\n"
-                    "q  Quit"
-                ),
-                title="llm-encryptor",
-                border_style="cyan",
-            )
-        )
-        choice = io.ask("> ").strip().lower()
-        if choice in ("q", "quit", "exit"):
+        items = [
+            "Encrypt a message",
+            "Decrypt a message",
+            f"Model: {settings.model}",
+            f"Format: {_FORMATS[settings.compact]}",
+            f"Density: {_DENSITIES[settings.tight]}",
+            "Change password",
+            "Quit",
+        ]
+        choice = choose(io, "llm-encryptor", items, at)
+        if choice is None or choice == len(items) - 1:
             return
-        action = _ACTIONS.get(choice)
-        if action is None:
-            io.console.print(Text("Type 1, 2, 3, 4, 5 or q.", style="yellow"))
-            continue
+        at = choice
         try:
-            settings = action(io, settings)
+            settings = _ACTIONS[choice](io, settings)
         except (UserError, BackendError, EmbedError, RevealError) as error:
             io.console.print(Text(str(error), style="red"))
         except KeyboardInterrupt:
             io.console.print(Text("Stopped.", style="yellow"))
+
+
+def choose(io: Io, title: str, items: list[str], start: int = 0) -> int | None:
+    """Let the user pick an item: with the arrow keys, or by typing its number."""
+    if io.choose is not None:
+        return io.choose(title, items, start)
+    numbered = "\n".join(f"{number}  {item}" for number, item in enumerate(items, 1))
+    io.console.print(Panel(Text(numbered), title=title, border_style="cyan"))
+    while True:
+        answer = io.ask("> ").strip().lower()
+        if answer in ("q", "quit", "exit"):
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(items):
+            return int(answer) - 1
+        io.console.print(Text(f"Type a number from 1 to {len(items)}, or q.", style="yellow"))
 
 
 def _encrypt(io: Io, settings: Settings) -> Settings:
@@ -77,7 +90,11 @@ def _encrypt(io: Io, settings: Settings) -> Settings:
     settings = _with_keys(io, settings, confirm=True)
     assert settings.keys is not None
     session = Session(
-        secret, settings.keys, io.make_backend(settings.model, settings.host), compact=settings.compact
+        secret,
+        settings.keys,
+        io.make_backend(settings.model, settings.host),
+        compact=settings.compact,
+        tight=settings.tight,
     )
     request = io.ask("What should the text be about? (Enter for a friendly note) ").strip()
     request = request or DEFAULT_TOPIC
@@ -120,19 +137,20 @@ def _decrypt(io: Io, settings: Settings) -> Settings:
 def _choose_model(io: Io, settings: Settings) -> Settings:
     installed = io.list_models(settings.host)
     if not installed:
-        raise UserError("Ollama has no models yet. Get one with `ollama pull qwen3:4b`.")
-    for number, name in enumerate(installed, 1):
-        io.console.print(Text(f"{number}  {name}"))
-    answer = io.ask("Which one? ").strip()
-    if answer.isdigit() and 1 <= int(answer) <= len(installed):
-        return replace(settings, model=installed[int(answer) - 1])
-    if answer in installed:
-        return replace(settings, model=answer)
-    raise UserError("That is not one of the models listed.")
+        raise UserError("Ollama has no models yet. Get one with `ollama pull qwen2.5:0.5b`.")
+    current = installed.index(settings.model) if settings.model in installed else 0
+    choice = choose(io, "Model (smallest first)", installed, current)
+    return settings if choice is None else replace(settings, model=installed[choice])
 
 
 def _switch_format(io: Io, settings: Settings) -> Settings:
     return replace(settings, compact=not settings.compact)
+
+
+def _switch_density(io: Io, settings: Settings) -> Settings:
+    if not settings.compact:
+        raise UserError("Density only applies to the compact format (item 4).")
+    return replace(settings, tight=not settings.tight)
 
 
 def _change_password(io: Io, settings: Settings) -> Settings:
@@ -153,10 +171,4 @@ def _read_file(name: str) -> str:
         raise UserError(f"Could not read {name}: {error.strerror}") from error
 
 
-_ACTIONS = {
-    "1": _encrypt,
-    "2": _decrypt,
-    "3": _choose_model,
-    "4": _switch_format,
-    "5": _change_password,
-}
+_ACTIONS = (_encrypt, _decrypt, _choose_model, _switch_format, _switch_density, _change_password)

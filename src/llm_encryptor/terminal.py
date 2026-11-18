@@ -55,6 +55,10 @@ class Io:
     stdin_is_terminal: Callable[[], bool] = sys.stdin.isatty
     make_backend: Callable[[str, str], Backend] = OllamaBackend
     list_models: Callable[[str], list[str]] = list_models
+    # Gets the model server ready; set in cli so tests can leave it out.
+    prepare: Callable[[Io, str], None] | None = None
+    # Lets the user pick from a list with the arrow keys; None means typing a number.
+    choose: Callable[[str, list[str], int], int | None] | None = None
 
 
 def ask_secret(io: Io) -> str:
@@ -129,3 +133,76 @@ class progress:
         shown = update.text[-_PREVIEW_CHARS:]
         status = f"hidden {update.embedded}/{update.total} bits"
         self._live.update(Panel(Text(shown), title=status, border_style="dim"))
+
+
+_UP, _DOWN = (b"\x1b[A", b"\x1bOA", b"k"), (b"\x1b[B", b"\x1bOB", b"j")
+_ENTER, _LEAVE = (b"\r", b"\n"), (b"q", b"\x1b")
+
+
+def pick(
+    title: str,
+    items: list[str],
+    start: int,
+    read_key: Callable[[], bytes],
+    write: Callable[[str], None],
+    width: int = 80,
+) -> int | None:
+    """Arrow keys move, Enter chooses, a digit jumps straight there, q or Esc leaves."""
+    at = min(max(start, 0), len(items) - 1)
+    drawn = False
+    while True:
+        lines = [f"\x1b[1m{title}\x1b[0m  \x1b[2m↑↓ move · Enter choose · q back\x1b[0m"]
+        for index, item in enumerate(items):
+            label = f"{index + 1}  {item}"[: max(10, width - 4)]
+            lines.append(f"\x1b[36;1m❯ {label}\x1b[0m" if index == at else f"  {label}")
+        rewind = f"\x1b[{len(lines)}A" if drawn else ""
+        write(rewind + "".join(f"\r\x1b[K{line}\n" for line in lines))
+        drawn = True
+        key = read_key()
+        if key in _UP:
+            at = (at - 1) % len(items)
+        elif key in _DOWN:
+            at = (at + 1) % len(items)
+        elif key in _ENTER:
+            return at
+        elif key in _LEAVE:
+            return None
+        elif key.isdigit() and 1 <= int(key) <= len(items):
+            return int(key) - 1
+        elif key == b"\x03":
+            raise KeyboardInterrupt
+        elif key in (b"\x04", b""):
+            raise EOFError
+
+
+def arrow_menu(title: str, items: list[str], start: int = 0) -> int | None:
+    """``pick`` on the real terminal, reading single key presses."""
+    import termios
+    import tty
+
+    descriptor = sys.stdin.fileno()
+    saved = termios.tcgetattr(descriptor)
+
+    def write(text: str) -> None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    try:
+        tty.setcbreak(descriptor)
+        write("\x1b[?25l")
+        return pick(
+            title, items, start, lambda: os.read(descriptor, 8), write, shutil.get_terminal_size().columns
+        )
+    finally:
+        write("\x1b[?25h")
+        termios.tcsetattr(descriptor, termios.TCSADRAIN, saved)
+
+
+def can_use_arrows() -> bool:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    try:
+        import termios  # noqa: F401
+    except ImportError:
+        return False
+    return True

@@ -40,9 +40,12 @@ from .words import complete_word_ends, is_word_char, split_words
 # All of these are part of the format: sender and reader must agree on them.
 OPENING_WORDS = 16
 # A token's share of the interval, by its probability: (at least, shares).
-# Flatter shares were tried and did not shorten the text: this model usually
-# has one clear favourite, so there is little to flatten.
-LEVELS = ((0.5, 16), (0.25, 8), (0.12, 4), (0.06, 2), (0.03, 1))
+# "natural" follows the model's own preferences. "tight" treats every word
+# the model finds at all plausible as nearly equally likely, which hides more
+# bits per word and reads less smoothly. The reader tries both.
+Levels = tuple[tuple[float, int], ...]
+NATURAL: Levels = ((0.5, 16), (0.25, 8), (0.12, 4), (0.06, 2), (0.03, 1))
+TIGHT: Levels = ((0.3, 2), (0.01, 1))
 OPENING_PROMPT = (
     "You are a skilled writer. Write what the user asks for as natural, flowing prose "
     "in plain text. Name the subject within the first ten words. Always write at least "
@@ -137,10 +140,10 @@ class Option:
     extends_word: bool = False
 
 
-def _share(probability: float, extends_word: bool) -> int:
+def _share(probability: float, extends_word: bool, levels: Levels) -> int:
     if extends_word and probability < WORD_PIECE_LEVEL:
         return 0
-    for at_least, share in LEVELS:
+    for at_least, share in levels:
         if probability >= at_least:
             return share
     return 0
@@ -193,9 +196,9 @@ def _without_repeats(found: Sequence[Option], written: str) -> list[Option]:
     return fresh
 
 
-def shares(found: Sequence[Option]) -> list[int]:
+def shares(found: Sequence[Option], levels: Levels = NATURAL) -> list[int]:
     """How the interval is shared among the options."""
-    result = [_share(o.probability, o.extends_word) for o in found]
+    result = [_share(o.probability, o.extends_word, levels) for o in found]
     if found and not any(result):
         # Nothing stands out: let the likeliest token through.
         best = max(range(len(found)), key=lambda i: (found[i].probability, found[i].token))
@@ -203,12 +206,12 @@ def shares(found: Sequence[Option]) -> list[int]:
     return result
 
 
-def _other_share(option: Option) -> int | None:
+def _other_share(option: Option, levels: Levels = NATURAL) -> int | None:
     """The share this option would get just across a nearby level boundary."""
-    here = _share(option.probability, option.extends_word)
+    here = _share(option.probability, option.extends_word, levels)
     nearby = {
-        _share(option.probability * (1 - WOBBLE), option.extends_word),
-        _share(option.probability * (1 + WOBBLE), option.extends_word),
+        _share(option.probability * (1 - WOBBLE), option.extends_word, levels),
+        _share(option.probability * (1 + WOBBLE), option.extends_word, levels),
     }
     return next(iter(nearby - {here}), None)
 
@@ -220,9 +223,11 @@ def write_dense(
     conversation: Sequence[Message],
     on_progress: ProgressCallback | None = None,
     rng: random.Random | None = None,
+    tight: bool = False,
 ) -> str:
     """A text that opens as ``conversation`` asks and carries ``secret``."""
     rng = rng or random.SystemRandom()
+    levels = TIGHT if tight else NATURAL
     asked = [{"role": "system", "content": OPENING_PROMPT}, *conversation]
     # What a model server has cached changes its numbers slightly. Writer and
     # reader therefore both start from a freshly loaded model, and every text
@@ -232,7 +237,7 @@ def write_dense(
     for _ in range(_WRITE_TRIES):
         opening = _opening(backend, asked)
         try:
-            text = _code(secret, keys, backend, opening, on_progress, rng)
+            text = _code(secret, keys, backend, opening, on_progress, rng, levels)
             if read_dense(text, keys, backend) == secret:
                 return text
         except DenseError:
@@ -253,6 +258,7 @@ def _code(
     text: str,
     on_progress: ProgressCallback | None,
     rng: random.Random,
+    levels: Levels,
 ) -> str:
     notify = on_progress or (lambda _progress: None)
     payload = DenseBox(keys.dense).seal(pack(secret), text)
@@ -268,7 +274,7 @@ def _code(
     backend.reset()
     for step in range(_TOKENS_PER_BIT * wanted + _TAIL_TOKENS):
         found = _lookup(backend, text, first=step == 0)
-        choices = [(o.token, share) for o, share in zip(found, shares(found)) if share]
+        choices = [(o.token, share) for o, share in zip(found, shares(found, levels)) if share]
         if not choices:
             raise _Stuck("The model stopped before the whole message was in the text.")
         total = sum(count for _, count in choices)
@@ -320,27 +326,28 @@ def read_dense(text: str, keys: Keys, backend: Backend) -> str:
         written += token
 
     box = DenseBox(keys.dense)
-    for reading in _readings(steps):
-        secret = _open(box, _bits(steps, reading), opening)
-        if secret is not None:
-            return secret
+    for levels in (NATURAL, TIGHT):
+        for reading in _readings(steps, levels):
+            secret = _open(box, _bits(steps, reading), opening)
+            if secret is not None:
+                return secret
     raise DenseError(
         "No hidden message found. The password or model may be wrong, "
         "or the text was changed."
     )
 
 
-def _readings(steps: Sequence[tuple[list[Option], int]]):
+def _readings(steps: Sequence[tuple[list[Option], int]], levels: Levels):
     """Ways to read the shares: as seen first, then with borderline ones moved.
 
     A token that was written must have had a share, so a written token we see
     below the lowest level is moved up without counting as a doubt.
     """
-    base = [shares(found) for found, _ in steps]
+    base = [shares(found, levels) for found, _ in steps]
     doubts = []
     for at, (found, chosen) in enumerate(steps):
         for i, option in enumerate(found):
-            other = _other_share(option)
+            other = _other_share(option, levels)
             if other is None:
                 continue
             if i == chosen and base[at][i] == 0:

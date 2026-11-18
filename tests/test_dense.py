@@ -6,8 +6,9 @@ from fakes import FakeBackend
 from llm_encryptor.backend import Choice
 from llm_encryptor.crypto import DENSE_OVERHEAD, DenseBox
 from llm_encryptor.dense import (
-    LEVELS,
+    NATURAL,
     OPENING_WORDS,
+    TIGHT,
     WOBBLE,
     DenseError,
     _Interval,
@@ -31,6 +32,15 @@ def test_secret_round_trips(keys, secret):
     backend = FakeBackend(seed=1)
     text = write_dense(secret, keys, backend, ASK)
     assert read_dense(text, keys, backend) == secret
+
+
+def test_tight_texts_read_back_without_being_told(keys):
+    backend = FakeBackend(seed=21)
+    secret = "a longer secret, so that the difference shows clearly"
+    tight = write_dense(secret, keys, backend, ASK, tight=True)
+    assert read_dense(tight, keys, backend) == secret
+    choices = [Choice(" a", 0.7), Choice(" b", 0.2), Choice(" c", 0.02), Choice(" d", 0.005)]
+    assert shares(options(choices, "x."), TIGHT) == [2, 1, 1, 0]
 
 
 def test_wrong_password_or_model_recovers_nothing(keys, other_keys):
@@ -153,7 +163,7 @@ def test_model_with_nothing_to_say_is_an_error(keys):
 
 def test_a_probability_near_a_level_is_read_both_ways(keys):
     """The reader sees one probability just across a boundary and still succeeds."""
-    boundary = LEVELS[1][0]
+    boundary = NATURAL[1][0]
 
     class Shifted(FakeBackend):
         shift = 0.0
@@ -245,7 +255,7 @@ def test_a_word_is_only_finished_the_likely_way():
 
 
 def test_borderline_probabilities_are_flagged():
-    edge = LEVELS[-1][0]
+    edge = NATURAL[-1][0]
     choices = [Choice(" a", edge * (1 + WOBBLE / 2)), Choice(" b", edge * (1 - WOBBLE / 2)), Choice(" c", 0.9)]
     found = options(choices, "x.")
     assert shares(found) == [1, 0, 16]

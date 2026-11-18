@@ -132,10 +132,34 @@ class OllamaBackend:
 
 
 def list_models(host: str = DEFAULT_HOST, transport: Transport | None = None) -> list[str]:
+    """Installed models, smallest first (the first one is the default)."""
     send = transport or http_transport(host)
     for answer in send("/api/tags", None):
-        return [model["name"] for model in answer.get("models", []) if model.get("name")]
+        models = [model for model in answer.get("models", []) if model.get("name")]
+        return [model["name"] for model in sorted(models, key=lambda m: m.get("size", 0))]
     return []
+
+
+def is_running(host: str = DEFAULT_HOST) -> bool:
+    try:
+        with urllib.request.urlopen(host.rstrip("/") + "/api/version", timeout=2):
+            return True
+    except (urllib.error.URLError, http.client.HTTPException, OSError):
+        return False
+
+
+def pull_model(
+    model: str, host: str = DEFAULT_HOST, transport: Transport | None = None
+) -> Iterator[str]:
+    """Download a model, yielding short progress lines."""
+    send = transport or http_transport(host)
+    for update in send("/api/pull", {"model": model, "stream": True}):
+        _raise_on_error(update)
+        total, done = update.get("total"), update.get("completed")
+        if total and done is not None:
+            yield f"{update.get('status', 'downloading')}: {100 * done // total // 10 * 10}%"
+        elif update.get("status"):
+            yield str(update["status"])
 
 
 def _choice(item: dict) -> Choice:

@@ -8,15 +8,14 @@ back with the password.
 
 ```console
 $ llm-encryptor
-╭─ llm-encryptor ──────────────────────────────────────────────╮
-│ 1  Encrypt a message                                         │
-│ 2  Decrypt a message                                         │
-│ 3  Model: qwen3:4b                                           │
-│ 4  Format: compact (short text; the reader needs the same …) │
-│ 5  Change password                                           │
-│ q  Quit                                                      │
-╰──────────────────────────────────────────────────────────────╯
-> 1
+llm-encryptor  ↑↓ move · Enter choose · q back
+❯ 1  Encrypt a message
+  2  Decrypt a message
+  3  Model: qwen2.5:0.5b
+  4  Format: compact (short text; the reader needs the same model)
+  5  Density: natural (reads best)
+  6  Change password
+  7  Quit
 Secret to hide: meet at noon
 Password (the reader needs the same one):
 What should the text be about? (Enter for a friendly note) write about Turkey
@@ -24,10 +23,11 @@ What should the text be about? (Enter for a friendly note) write about Turkey
 │ Turkey stretches across two continents, a land where …       │
 ╰──────────────────────────────────────────────────────────────╯
 ✓ 107 words · copied to your clipboard
-To read it: the password and the model qwen3:4b.
+To read it: the password and the model qwen2.5:0.5b.
 Ask for a change (e.g. make it friendlier), or Enter when done:
 ```
 
+Move with the arrow keys and press Enter, or press an item's number.
 Decrypt reads the text from your clipboard (or a file, or pasted text). The
 password is asked once and kept until you close the app.
 
@@ -47,13 +47,23 @@ Robust hides bits in a keyed hash of the words, which any computer can check.
 
 ## Install
 
-You need Python 3.10+ and [Ollama](https://ollama.com) 0.12.11 or later with
-at least one model. (Reading a robust-format text needs neither.)
-
 ```console
-$ ollama pull qwen3:4b
-$ uv sync && uv run llm-encryptor        # from a checkout
+$ uv tool install git+https://github.com/<you>/llm-encryptor   # or, from a checkout: uv tool install .
+$ llm-encryptor
 ```
+
+That is all. The app looks after [Ollama](https://ollama.com), the program
+that runs the models:
+
+- if Ollama is not installed, it offers to install it with Homebrew (on other
+  systems it tells you where to get it);
+- if Ollama is not running, it starts it in the background and leaves it
+  running, so the next start is instant;
+- if no model is installed, it offers to download a small one
+  (`qwen2.5:0.5b`, about 400 MB).
+
+It uses the smallest installed model unless you choose another. Small models
+are fast but write clumsier prose; `qwen3:4b` reads much better.
 
 ## Use
 
@@ -65,11 +75,16 @@ Run `llm-encryptor` for the menu. For scripts there are one-shot commands:
 | `llm-encryptor reveal msg.txt` | Recover the secret (or paste the text, then Ctrl-D) |
 | `llm-encryptor models` | List the models you can use |
 
-**Choosing a model.** Menu item 3, or `--model NAME` (default: the first model
-Ollama lists, or `$LLM_ENCRYPTOR_MODEL`). Any model Ollama runs will do. Small
-ones are faster: `qwen2.5:0.5b` writes a text in a few seconds, but its prose
-is clumsier. For compact texts both sides must use the same model, so tell
-your friend which one.
+**Choosing a model.** Menu item 3, or `--model NAME` (default: the smallest
+installed model, or `$LLM_ENCRYPTOR_MODEL`). Any model Ollama runs will do.
+For compact texts both sides must use the same model, so tell your friend
+which one.
+
+**Density.** Menu item 5, or `--tight`. Tight treats every word the model
+finds plausible as about equally likely, which hides more bits per word. In
+tests a 39-character secret took about 95–150 words instead of 190–230; very
+short secrets gain little. The text reads less smoothly. The reader detects
+the density by itself.
 
 Other options: `--robust`, `--host URL` (or `$OLLAMA_HOST`); the password can
 come from `$LLM_ENCRYPTOR_PASSWORD` for scripts. `hide --secret "…"` puts the
@@ -88,9 +103,11 @@ bits must be hidden. For "meet at noon" in the compact format:
 | Tag that tells a real message from noise | 32 |
 
 That is 104 bits, about 75 words, plus 16 free opening words and the words
-needed to finish the last sentence. Getting much below that would mean giving
-up the tag (then a wrong password returns garbage instead of an error) or
-letting the text read less naturally.
+needed to finish the last sentence. One cover word per secret letter is out
+of reach for text that should read naturally: a letter is 3–5 bits and a
+natural word carries about 1.4. The tight density trades smoothness for more
+bits per word. What is left to gain is compressing the secret with the model
+itself (roughly 2 bits a letter instead of 4.3), which is not built yet.
 
 ## How it works
 

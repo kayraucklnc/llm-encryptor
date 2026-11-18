@@ -18,12 +18,15 @@ from .dense import read_dense, write_dense
 from .embed import EmbedConfig, EmbedError
 from .hide import hide, validate_secret
 from .ollama import DEFAULT_HOST
+from .runtime import ensure_ready
 from .terminal import (
     PASSWORD_ENV,
     Io,
     UserError,
+    arrow_menu,
     ask_keys,
     ask_secret,
+    can_use_arrows,
     progress,
     reader_needs,
     save_text,
@@ -35,7 +38,7 @@ __all__ = ["HOST_ENV", "MODEL_ENV", "PASSWORD_ENV", "Io", "main"]
 
 
 def main(argv: Sequence[str] | None = None, io: Io | None = None) -> int:
-    io = io or Io()
+    io = io or Io(prepare=ensure_ready, choose=arrow_menu if can_use_arrows() else None)
     args = _parser().parse_args(argv)
     try:
         command = {"hide": _hide, "reveal": _reveal, "models": _models}.get(args.command, _menu)
@@ -62,6 +65,12 @@ def _parser() -> argparse.ArgumentParser:
         help="write a longer text that can be read without a model",
     )
     shared.add_argument(
+        "--tight",
+        action="store_true",
+        default=unset,
+        help="compact format: fewer words, less natural wording",
+    )
+    shared.add_argument(
         "--temperature", type=float, default=unset, help="robust format: how freely the model writes"
     )
 
@@ -85,7 +94,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _menu(args: argparse.Namespace, io: Io) -> None:
-    run_app(io, Settings(_host(args), _model(args, io), compact=_compact(args)))
+    _prepare(args, io)
+    settings = Settings(_host(args), _model(args, io), _compact(args), _tight(args))
+    run_app(io, settings)
 
 
 def _hide(args: argparse.Namespace, io: Io) -> None:
@@ -95,7 +106,7 @@ def _hide(args: argparse.Namespace, io: Io) -> None:
     conversation: list[Message] = [{"role": "user", "content": args.about}]
     with progress(io) as on_progress:
         if _compact(args):
-            cover = write_dense(secret, keys, backend, conversation, on_progress)
+            cover = write_dense(secret, keys, backend, conversation, on_progress, tight=_tight(args))
         else:
             cover = hide(secret, keys, backend, conversation, _config(args), on_progress)
     io.errors.print(Text(reader_needs(backend, _compact(args)), style="dim"))
@@ -132,6 +143,7 @@ def _reveal(args: argparse.Namespace, io: Io) -> None:
 
 
 def _models(args: argparse.Namespace, io: Io) -> None:
+    _prepare(args, io)
     for name in _installed(io, _host(args)):
         io.console.print(Text(name))
 
@@ -141,6 +153,15 @@ def _config(args: argparse.Namespace) -> EmbedConfig:
     if not 0 < temperature <= 2:
         raise UserError("The temperature must be above 0 and at most 2.")
     return EmbedConfig(temperature=temperature)
+
+
+def _prepare(args: argparse.Namespace, io: Io) -> None:
+    if io.prepare is not None:
+        io.prepare(io, _host(args))
+
+
+def _tight(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "tight", False))
 
 
 def _compact(args: argparse.Namespace) -> bool:
@@ -165,6 +186,7 @@ def _model(args: argparse.Namespace, io: Io) -> str:
 
 
 def _backend(args: argparse.Namespace, io: Io, purpose: str) -> Backend:
+    _prepare(args, io)
     model = _model(args, io)
     io.errors.print(f"[dim]{purpose} with {escape(model)}[/dim]")
     return io.make_backend(model, _host(args))

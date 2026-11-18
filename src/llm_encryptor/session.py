@@ -21,13 +21,17 @@ class Session:
     cover: str | None = None
     # Compact: short texts, but the reader needs the same model.
     compact: bool = True
+    # Tight (compact only): fewer words, less natural wording.
+    tight: bool = False
 
     def instruct(self, instruction: str, on_progress: ProgressCallback | None = None) -> Session:
         """Write or revise the cover text; the secret stays embedded."""
         request: Message = {"role": "user", "content": instruction}
         asked = (*self.conversation, request)
         if self.compact:
-            cover = write_dense(self.secret, self.keys, self.backend, asked, on_progress)
+            cover = write_dense(
+                self.secret, self.keys, self.backend, asked, on_progress, tight=self.tight
+            )
         else:
             cover = hide(self.secret, self.keys, self.backend, asked, self.config, on_progress)
         answer: Message = {"role": "assistant", "content": cover}
