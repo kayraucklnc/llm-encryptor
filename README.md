@@ -114,6 +114,10 @@ follows the same intervals and reads the bits off the final one.
   level boundary the reader tries both sides (the encryption tag tells which
   is right). Writer and reader both start from a freshly loaded model, because
   what the server has cached changes its numbers slightly.
+- No run of three words may appear twice in a text. A model that starts
+  going in circles becomes certain of every next word, and a certain word
+  hides nothing. If a text still makes no progress for 40 tokens, it is
+  thrown away and started again.
 - The secret is packed with a fixed Huffman code before it is encrypted.
   Overhead is 6 bytes: 2 random bytes and a 4-byte tag. The rest of the nonce
   is a hash of the opening words.

@@ -201,6 +201,37 @@ def test_options_are_sorted_and_cannot_be_confused():
     assert [option.token for option in found] == [" at", " in"]
 
 
+def test_words_already_said_in_that_order_are_not_offered_again():
+    written = "We were part of a group, who were part of a"
+    choices = [Choice(" group", 0.9), Choice(" team", 0.05), Choice(",", 0.05)]
+    assert [o.token for o in options(choices, written)] == [" team", ","]
+    # ...also when the repeat is completed by a word piece
+    assert [o.token for o in options([Choice("oup", 0.9), Choice("ove", 0.1)], written + " gr")] == ["ove"]
+    # ...but with nothing else to say, the repeat is allowed rather than getting stuck
+    assert [o.token for o in options([Choice(" group", 1.0)], written)] == [" group"]
+    assert [o.token for o in options([Choice(" who", 1.0), Choice(" x", 0.1)], "who, who, who,")] == [" x"]
+
+
+def test_a_text_going_nowhere_is_started_again(keys):
+    class Looping(FakeBackend):
+        """Until its second opening, offers a single choice at every step: no bits fit."""
+
+        openings = 0
+
+        def start(self, messages, pieces=8):
+            Looping.openings += 1
+            return super().start(messages, pieces)
+
+        def next_tokens(self, messages, prefix, attempt=0):
+            choices = super().next_tokens(messages, prefix, attempt)
+            return choices[:1] if Looping.openings < 2 else choices
+
+    backend = Looping(seed=14)
+    text = write_dense("top secret", keys, backend, ASK)
+    assert Looping.openings == 2
+    assert read_dense(text, keys, backend) == "top secret"
+
+
 def test_shares_follow_the_levels():
     choices = [Choice(" a", 0.7), Choice(" b", 0.2), Choice(" c", 0.07), Choice(" d", 0.01)]
     assert shares(options(choices, "x.")) == [16, 4, 2, 0]

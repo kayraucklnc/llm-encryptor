@@ -35,7 +35,7 @@ from .codec import RevealError
 from .crypto import DENSE_OVERHEAD, MAX_SECRET_BYTES, DenseBox, Keys
 from .embed import EmbedError, Progress, ProgressCallback
 from .textcode import pack, unpack
-from .words import complete_word_ends, is_word_char
+from .words import complete_word_ends, is_word_char, split_words
 
 # All of these are part of the format: sender and reader must agree on them.
 OPENING_WORDS = 16
@@ -57,6 +57,8 @@ _INSIST: Message = {
 }
 # A word is only continued by a token at least this likely (avoids misspellings).
 WORD_PIECE_LEVEL = 0.25
+# A run of this many words may not appear twice: it stops the model going in circles.
+NO_REPEAT_WORDS = 3
 # How far, relatively, a probability may differ between writer and reader.
 WOBBLE = 0.03
 CONTINUE: tuple[Message, ...] = (
@@ -75,8 +77,10 @@ _LOOKUP_TRIES = 12
 _WRITE_TRIES = 3
 _PADDING_BITS = 8192
 _MAX_BITS = 8 * (DENSE_OVERHEAD + MAX_SECRET_BYTES + 1)
-_TOKENS_PER_BIT = 8
+_TOKENS_PER_BIT = 3
 _TAIL_TOKENS = 60
+# A healthy text hides a bit every token or two; give up on one that hides none for this long.
+_STALL_TOKENS = 40
 _MAX_READINGS = 1000
 _MAX_DOUBTS_FLIPPED = 4
 _SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*$")
@@ -166,7 +170,27 @@ def options(choices: Sequence[Choice], written: str, first: bool = False) -> lis
             continue
         keys.append(key)
         kept.append(Option(token, probability, mid_word and is_word_char(token[0])))
-    return kept
+    fresh = _without_repeats(kept, written)
+    return fresh or kept
+
+
+def _without_repeats(found: Sequence[Option], written: str) -> list[Option]:
+    """Drop tokens that would make the text say the same few words again.
+
+    A model that starts repeating itself becomes certain of every next word,
+    and a certain word hides nothing: the text would grow without carrying
+    more of the message.
+    """
+    words = split_words(written)
+    runs = {tuple(words[i : i + NO_REPEAT_WORDS]) for i in range(len(words) - NO_REPEAT_WORDS + 1)}
+    fresh = []
+    for option in found:
+        after = split_words(written + option.token)
+        last = tuple(after[-NO_REPEAT_WORDS:])
+        # A token that adds no letters (punctuation) cannot start a repeat.
+        if after == words or len(last) < NO_REPEAT_WORDS or last not in runs:
+            fresh.append(option)
+    return fresh
 
 
 def shares(found: Sequence[Option]) -> list[int]:
@@ -199,18 +223,27 @@ def write_dense(
 ) -> str:
     """A text that opens as ``conversation`` asks and carries ``secret``."""
     rng = rng or random.SystemRandom()
-    opening = _opening(backend, [{"role": "system", "content": OPENING_PROMPT}, *conversation])
+    asked = [{"role": "system", "content": OPENING_PROMPT}, *conversation]
     # What a model server has cached changes its numbers slightly. Writer and
     # reader therefore both start from a freshly loaded model, and every text
-    # is read back before it is returned, and written again if that fails.
+    # is read back before it is returned. A text that fails, or that stops
+    # making progress, is thrown away and begun again with a new opening.
+    problem = "The finished text did not decode back to the secret."
     for _ in range(_WRITE_TRIES):
-        text = _code(secret, keys, backend, opening, on_progress, rng)
+        opening = _opening(backend, asked)
         try:
+            text = _code(secret, keys, backend, opening, on_progress, rng)
             if read_dense(text, keys, backend) == secret:
                 return text
         except DenseError:
             continue
-    raise EmbedError("The finished text did not decode back to the secret. Please try again.")
+        except _Stuck as stuck:
+            problem = str(stuck)
+    raise EmbedError(f"{problem} Please try again, or pick a larger model.")
+
+
+class _Stuck(Exception):
+    """This attempt at a text is not getting anywhere."""
 
 
 def _code(
@@ -231,12 +264,13 @@ def _code(
 
     interval = _Interval()
     done_at: int | None = None
+    gained_at, most = 0, 0
     backend.reset()
     for step in range(_TOKENS_PER_BIT * wanted + _TAIL_TOKENS):
         found = _lookup(backend, text, first=step == 0)
         choices = [(o.token, share) for o, share in zip(found, shares(found)) if share]
         if not choices:
-            break
+            raise _Stuck("The model stopped before the whole message was in the text.")
         total = sum(count for _, count in choices)
         # Which share of the interval holds the point?
         offset = point * interval.scale - (interval.low << digits)
@@ -255,9 +289,11 @@ def _code(
             done_at = step if done_at is None else done_at
             if _SENTENCE_END.search(text.rstrip()) or step - done_at >= _TAIL_TOKENS:
                 return text.rstrip()
-    raise EmbedError(
-        "The model stopped before the whole message was in the text. Try again."
-    )
+        elif agreed > most:
+            gained_at, most = step, agreed
+        elif step - gained_at >= _STALL_TOKENS:
+            break
+    raise _Stuck("The model kept writing without leaving room for the message.")
 
 
 def read_dense(text: str, keys: Keys, backend: Backend) -> str:
