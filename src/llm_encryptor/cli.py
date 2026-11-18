@@ -21,8 +21,9 @@ from rich.text import Text
 from .backend import Backend, BackendError, Message
 from .codec import RevealError, reveal_with_keys
 from .crypto import Keys, derive_keys
+from .dense import DenseError, read_dense, write_dense
 from .embed import EmbedConfig, EmbedError, Progress
-from .hide import hide, validate_secret, words_needed
+from .hide import hide, system_message, validate_and_size, validate_secret
 from .ollama import DEFAULT_HOST, OllamaBackend, list_models
 from .session import Session
 from .words import split_words
@@ -42,6 +43,9 @@ HELP = """\
 Type what the text should be about, then keep asking for changes.
 Every version carries the same secret.
 
+  /model NAME    write with another model (/models lists them)
+  /mode MODE     compact: short text, the reader needs the same model (default)
+                 robust: about three times longer, the reader needs no model
   /copy          copy the latest text to the clipboard
   /save FILE     write the latest text to a file
   /secret        hide a different secret from now on
@@ -72,9 +76,9 @@ def main(argv: Sequence[str] | None = None, io: Io | None = None) -> int:
     io = io or Io()
     args = _parser().parse_args(argv)
     try:
-        command = {"hide": _hide, "reveal": _reveal}.get(args.command, _chat)
+        command = {"hide": _hide, "reveal": _reveal, "models": _models}.get(args.command, _chat)
         command(args, io)
-    except (UserError, BackendError, EmbedError, RevealError, ValueError) as error:
+    except (UserError, BackendError, EmbedError, DenseError, ValueError) as error:
         io.errors.print(Text(str(error), style="red"))
         return 1
     except (KeyboardInterrupt, EOFError):
@@ -92,7 +96,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     model_options.add_argument("--host", default=unset, help=f"Ollama address (or ${HOST_ENV})")
     model_options.add_argument(
-        "--temperature", type=float, default=unset, help="how freely the model writes (default 1.0)"
+        "--temperature", type=float, default=unset, help="robust format: how freely the model writes"
+    )
+    model_options.add_argument(
+        "--robust",
+        action="store_true",
+        default=unset,
+        help="write a longer text that can be read without a model",
     )
 
     parser = argparse.ArgumentParser(
@@ -108,7 +118,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     hide_parser.add_argument("--about", "-a", required=True, help="what the cover text should say")
     hide_parser.add_argument("--out", "-o", type=Path, help="write the text here instead of printing it")
-    reveal_parser = commands.add_parser("reveal", help="recover the secret from a text")
+    commands.add_parser("models", parents=[model_options], help="list the models you can write with")
+    reveal_parser = commands.add_parser(
+        "reveal", parents=[model_options], help="recover the secret from a text"
+    )
     reveal_parser.add_argument("file", nargs="?", type=Path, help="file with the text (default: paste it)")
     return parser
 
@@ -121,8 +134,8 @@ def _chat(args: argparse.Namespace, io: Io) -> None:
     io.console.print(Panel(HELP, title="llm-encryptor", border_style="cyan"))
     secret = _ask_secret(io)
     keys = _keys(io, confirm=True)
-    session = Session(secret, keys, backend, _config(args))
-    _print_size(io, secret)
+    session = Session(secret, keys, backend, _config(args), compact=_compact(args))
+    _print_size(io, session)
     while True:
         line = io.ask("\nyou › ").strip()
         if not line:
@@ -130,12 +143,12 @@ def _chat(args: argparse.Namespace, io: Io) -> None:
         if line in ("/quit", "/exit", "/q"):
             return
         try:
-            session = _handle(line, session, io)
+            session = _handle(line, session, io, args)
         except UserError as error:
             io.console.print(Text(str(error), style="yellow"))
 
 
-def _handle(line: str, session: Session, io: Io) -> Session:
+def _handle(line: str, session: Session, io: Io, args: argparse.Namespace) -> Session:
     command, _, argument = line.partition(" ")
     if command == "/help":
         io.console.print(HELP)
@@ -145,7 +158,19 @@ def _handle(line: str, session: Session, io: Io) -> Session:
         _save(_latest(session), argument.strip(), io)
     elif command == "/secret":
         session = session.with_secret(_ask_secret(io))
-        _print_size(io, session.secret)
+        _print_size(io, session)
+    elif command == "/models":
+        _print_models(io, _host(args))
+    elif command == "/model":
+        if not argument.strip():
+            raise UserError("Say which model: /model NAME (see /models)")
+        session = session.with_backend(io.make_backend(argument.strip(), _host(args)))
+        io.console.print(Text(f"Writing with {argument.strip()} from now on.", style="dim"))
+    elif command == "/mode":
+        if argument.strip() not in ("compact", "robust"):
+            raise UserError("Choose one: /mode compact or /mode robust")
+        session = session.with_mode(argument.strip() == "compact")
+        _print_size(io, session)
     elif command == "/new":
         session = session.restarted()
         io.console.print("[dim]Started over. The secret and password are unchanged.[/dim]")
@@ -172,6 +197,7 @@ def _write(session: Session, instruction: str, io: Io) -> Session:
         f"[green]✓[/green] {len(split_words(cover))} words · checked: it decodes back to "
         "your secret · [dim]/copy to copy it, or ask for changes[/dim]"
     )
+    io.console.print(Text(_reader_needs(session.backend, session.compact), style="dim"))
     return session
 
 
@@ -181,7 +207,11 @@ def _hide(args: argparse.Namespace, io: Io) -> None:
     keys = _keys(io, confirm=True)
     conversation: list[Message] = [{"role": "user", "content": args.about}]
     with _progress(io) as on_progress:
-        cover = hide(secret, keys, backend, conversation, _config(args), on_progress)
+        if _compact(args):
+            cover = write_dense(secret, keys, backend, [system_message(secret), *conversation], on_progress)
+        else:
+            cover = hide(secret, keys, backend, conversation, _config(args), on_progress)
+    io.errors.print(Text(_reader_needs(backend, _compact(args)), style="dim"))
     if args.out:
         _save(cover, str(args.out), io)
     else:
@@ -200,7 +230,22 @@ def _reveal(args: argparse.Namespace, io: Io) -> None:
         text = io.read_stdin()
     if not text.strip():
         raise UserError("There is no text to read.")
-    print(reveal_with_keys(text, _keys(io, confirm=False)))
+    keys = _keys(io, confirm=False)
+    try:
+        print(reveal_with_keys(text, keys))  # The robust format needs no model.
+        return
+    except RevealError:
+        pass
+    try:
+        print(read_dense(text, keys, _backend(args, io, purpose="Reading")))
+    except BackendError as error:
+        raise UserError(
+            f"No message found without a model, and the compact format could not be tried: {error}"
+        ) from error
+
+
+def _models(args: argparse.Namespace, io: Io) -> None:
+    _print_models(io, _host(args))
 
 
 # --- helpers --------------------------------------------------------------
@@ -213,17 +258,39 @@ def _config(args: argparse.Namespace) -> EmbedConfig:
     return EmbedConfig(temperature=temperature)
 
 
-def _backend(args: argparse.Namespace, io: Io) -> Backend:
+def _compact(args: argparse.Namespace) -> bool:
+    return not getattr(args, "robust", False)
+
+
+def _host(args: argparse.Namespace) -> str:
     host = getattr(args, "host", None) or os.environ.get(HOST_ENV) or DEFAULT_HOST
-    if "://" not in host:
-        host = f"http://{host}"
+    return host if "://" in host else f"http://{host}"
+
+
+def _print_models(io: Io, host: str) -> None:
+    installed = io.list_models(host)
+    if not installed:
+        raise UserError("Ollama has no models yet. Get one with `ollama pull qwen3:4b`.")
+    for name in installed:
+        io.console.print(Text(name))
+
+
+def _reader_needs(backend: Backend, compact: bool) -> str:
+    if not compact:
+        return "To read it: the password. No model needed."
+    model = getattr(backend, "model", "the same model")
+    return f"To read it: the password and the model {model} (llm-encryptor reveal --model {model})."
+
+
+def _backend(args: argparse.Namespace, io: Io, purpose: str = "Writing") -> Backend:
+    host = _host(args)
     model = getattr(args, "model", None) or os.environ.get(MODEL_ENV)
     if not model:
         installed = io.list_models(host)
         if not installed:
             raise UserError("Ollama has no models yet. Get one with `ollama pull qwen3:4b`.")
         model = installed[0]
-    io.errors.print(f"[dim]Writing with {escape(model)}[/dim]")
+    io.errors.print(f"[dim]{purpose} with {escape(model)}[/dim]")
     return io.make_backend(model, host)
 
 
@@ -244,11 +311,8 @@ def _keys(io: Io, confirm: bool) -> Keys:
     return derive_keys(password)
 
 
-def _print_size(io: Io, secret: str) -> None:
-    io.console.print(
-        f"[dim]This secret needs a text of at least {words_needed(secret)} words, "
-        "so ask for something that long.[/dim]"
-    )
+def _print_size(io: Io, session: Session) -> None:
+    io.console.print(Text(validate_and_size(session.secret, session.compact), style="dim"))
 
 
 def _latest(session: Session) -> str:

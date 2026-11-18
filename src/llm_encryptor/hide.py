@@ -25,6 +25,14 @@ def payload_bit_count(secret: str) -> int:
     return 8 * (len(secret.encode("utf-8")) + OVERHEAD)
 
 
+def validate_and_size(secret: str, compact: bool) -> str:
+    """A line telling the user how long the text for this secret will be."""
+    validate_secret(secret)
+    if compact:
+        return "Compact format: expect very roughly 15 words per character, plus 100."
+    return f"Word-hash format: the text needs at least {words_needed(secret)} words."
+
+
 def words_needed(secret: str) -> int:
     """How many words of cover text the hidden payload takes up."""
     blocks = -(-payload_bit_count(secret) // BITS_PER_BLOCK)

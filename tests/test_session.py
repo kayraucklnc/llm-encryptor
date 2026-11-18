@@ -6,7 +6,7 @@ from llm_encryptor.session import Session
 
 
 def test_every_revision_still_carries_the_secret(keys):
-    session = Session("the eagle lands at dawn", keys, FakeBackend(seed=1))
+    session = Session("the eagle lands at dawn", keys, FakeBackend(seed=1), compact=False)
     first = session.instruct("Write about Turkey.")
     second = first.instruct("Make it more friendly.")
     assert first.cover != second.cover
@@ -22,7 +22,7 @@ def test_the_model_sees_the_earlier_version_when_revising(keys):
             seen.append(list(messages))
             return super().next_tokens(messages, prefix)
 
-    first = Session("hi", keys, Spy(seed=2)).instruct("Write about Turkey.")
+    first = Session("hi", keys, Spy(seed=2), compact=False).instruct("Write about Turkey.")
     first.instruct("Make it more friendly.")
     roles = [message["role"] for message in seen[-1]]
     assert roles == ["system", "user", "assistant", "user"]
@@ -31,21 +31,21 @@ def test_the_model_sees_the_earlier_version_when_revising(keys):
 
 
 def test_sessions_are_not_changed_in_place(keys):
-    session = Session("hi", keys, FakeBackend(seed=3))
+    session = Session("hi", keys, FakeBackend(seed=3), compact=False)
     session.instruct("Write about Turkey.")
     assert session.cover is None
     assert session.conversation == ()
 
 
 def test_secret_can_be_replaced(keys):
-    session = Session("hi", keys, FakeBackend(seed=4)).with_secret("new secret")
+    session = Session("hi", keys, FakeBackend(seed=4), compact=False).with_secret("new secret")
     assert reveal_with_keys(session.instruct("Write.").cover, keys) == "new secret"
     with pytest.raises(ValueError):
         session.with_secret("")
 
 
 def test_restart_forgets_the_conversation(keys):
-    session = Session("hi", keys, FakeBackend(seed=5)).instruct("Write.").restarted()
+    session = Session("hi", keys, FakeBackend(seed=5), compact=False).instruct("Write.").restarted()
     assert session.conversation == ()
     assert session.cover is None
     assert session.secret == "hi"

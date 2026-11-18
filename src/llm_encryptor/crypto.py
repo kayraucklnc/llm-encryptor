@@ -32,10 +32,15 @@ _KEY_LEN = 32
 
 @dataclass(frozen=True)
 class Keys:
-    """Keys derived from one password: one to encrypt, one to hash words."""
+    """Keys derived from one password.
+
+    ``enc`` and ``mac`` serve the word-hash format (encrypt, hash words);
+    ``dense`` encrypts in the compact format.
+    """
 
     enc: bytes = field(repr=False)
     mac: bytes = field(repr=False)
+    dense: bytes = field(repr=False, default=b"")
 
 
 def derive_keys(password: str) -> Keys:
@@ -49,9 +54,11 @@ def derive_keys(password: str) -> Keys:
         r=_SCRYPT_R,
         p=_SCRYPT_P,
         maxmem=_SCRYPT_MAXMEM,
-        dklen=2 * _KEY_LEN,
+        dklen=3 * _KEY_LEN,
     )
-    return Keys(enc=raw[:_KEY_LEN], mac=raw[_KEY_LEN:])
+    return Keys(
+        enc=raw[:_KEY_LEN], mac=raw[_KEY_LEN : 2 * _KEY_LEN], dense=raw[2 * _KEY_LEN :]
+    )
 
 
 class SecretBox:
@@ -72,3 +79,43 @@ class SecretBox:
             return self._aead.decrypt(blob[:NONCE_LEN], blob[NONCE_LEN:], None)
         except InvalidTag:
             return None
+
+
+DENSE_SALT_LEN = 4
+DENSE_TAG_LEN = 6
+DENSE_OVERHEAD = DENSE_SALT_LEN + DENSE_TAG_LEN
+_DENSE_NONCE_LEN = 13
+_DENSE_LABEL = b"llm-encryptor/dense/v1\x00"
+
+
+class DenseBox:
+    """Sealing for the compact format, where every bit of overhead shows.
+
+    Only four random bytes travel with the message. The rest of the nonce is
+    a hash of the text's opening words, which the reader sees anyway, so two
+    messages share a nonce only if both the opening and those bytes repeat.
+    The tag is six bytes: enough to tell a real message from noise even when
+    the reader has to try a few thousand readings of the text.
+    """
+
+    def __init__(self, dense_key: bytes) -> None:
+        self._aead = AESCCM(dense_key, tag_length=DENSE_TAG_LEN)
+
+    def seal(self, plaintext: bytes, opening: str) -> bytes:
+        salt = os.urandom(DENSE_SALT_LEN)
+        return salt + self._aead.encrypt(_dense_nonce(opening, salt), plaintext, None)
+
+    def open(self, blob: bytes, opening: str) -> bytes | None:
+        """Return the plaintext, or None when the blob is not authentic."""
+        if len(blob) <= DENSE_OVERHEAD:
+            return None
+        salt, sealed = blob[:DENSE_SALT_LEN], blob[DENSE_SALT_LEN:]
+        try:
+            return self._aead.decrypt(_dense_nonce(opening, salt), sealed, None)
+        except InvalidTag:
+            return None
+
+
+def _dense_nonce(opening: str, salt: bytes) -> bytes:
+    digest = hashlib.sha256(_DENSE_LABEL + opening.encode("utf-8")).digest()
+    return digest[: _DENSE_NONCE_LEN - DENSE_SALT_LEN] + salt

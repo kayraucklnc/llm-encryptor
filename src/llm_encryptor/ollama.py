@@ -15,7 +15,6 @@ from .backend import BackendError, Choice, Message
 DEFAULT_HOST = "http://localhost:11434"
 _TIMEOUT_SECONDS = 300
 _TOP_TOKENS = 20
-_OPENING_PIECES = 8
 # Reasoning models think before they answer; allow for that at the start.
 _MAX_OPENING_CHUNKS = 8192
 _CONTROL_TOKEN = re.compile(r"<\|\w+\|>|</s>|<eos>|<end_of_turn>")
@@ -51,10 +50,15 @@ def http_transport(host: str) -> Transport:
 
 class OllamaBackend:
     def __init__(
-        self, model: str, host: str = DEFAULT_HOST, transport: Transport | None = None
+        self,
+        model: str,
+        host: str = DEFAULT_HOST,
+        transport: Transport | None = None,
+        options: dict | None = None,
     ) -> None:
         self.model = model
         self._send = transport or http_transport(host)
+        self._options = dict(options or {})
 
     def next_tokens(self, messages: Sequence[Message], prefix: str) -> Sequence[Choice]:
         """Ask for one token and read the alternatives the model weighed."""
@@ -65,7 +69,10 @@ class OllamaBackend:
             "think": False,
             "logprobs": True,
             "top_logprobs": _TOP_TOKENS,
-            "options": {"num_predict": 1, "temperature": 1.0},
+            # Greedy and seeded: the token the server itself picks stays in its
+            # cache and so affects the numbers of the next call. It must be the
+            # same for writer and reader. The reported probabilities are raw.
+            "options": {**self._options, "num_predict": 1, "temperature": 0.0, "seed": 0},
         }
         for answer in self._send("/api/chat", body):
             _raise_on_error(answer)
@@ -79,24 +86,34 @@ class OllamaBackend:
             return [Choice("", 1.0)]  # No token at all: the model chose to end its reply.
         raise BackendError("Ollama returned an empty answer.")
 
-    def start(self, messages: Sequence[Message]) -> str:
-        """Stream a reply and stop once a few pieces of visible text have arrived."""
-        body = {"model": self.model, "messages": list(messages), "stream": True}
-        pieces: list[str] = []
+    def reset(self) -> None:
+        """Unload the model. The next request loads it afresh, with nothing cached."""
+        for answer in self._send("/api/generate", {"model": self.model, "keep_alive": 0}):
+            _raise_on_error(answer)
+
+    def start(self, messages: Sequence[Message], pieces: int = 8) -> str:
+        """Stream a reply and stop once ``pieces`` pieces of visible text have arrived."""
+        body = {
+            "model": self.model,
+            "messages": list(messages),
+            "stream": True,
+            "options": dict(self._options),
+        }
+        got: list[str] = []
         stream = self._send("/api/chat", body)
         try:
             for count, chunk in enumerate(stream):
                 _raise_on_error(chunk)
                 piece = chunk.get("message", {}).get("content", "")
                 if piece:
-                    pieces.append(piece)
-                if len(pieces) >= _OPENING_PIECES or chunk.get("done") or count >= _MAX_OPENING_CHUNKS:
+                    got.append(piece)
+                if len(got) >= pieces or chunk.get("done") or count >= _MAX_OPENING_CHUNKS:
                     break
         finally:
             close = getattr(stream, "close", None)
             if close is not None:
                 close()
-        return "".join(pieces)
+        return "".join(got)
 
 
 def list_models(host: str = DEFAULT_HOST, transport: Transport | None = None) -> list[str]:

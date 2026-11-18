@@ -139,3 +139,18 @@ def test_http_transport_reports_unreadable_answers(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: io.BytesIO(b"<html>"))
     with pytest.raises(BackendError):
         list(http_transport("http://host:1")("/api/chat", {}))
+
+
+def test_reset_unloads_the_model():
+    transport = Recorder([{"done": True}])
+    OllamaBackend("m", transport=transport).reset()
+    assert transport.requests == [("/api/generate", {"model": "m", "keep_alive": 0})]
+    with pytest.raises(BackendError):
+        OllamaBackend("m", transport=Recorder([{"error": "no such model"}])).reset()
+
+
+def test_extra_options_are_sent_but_cannot_change_the_lookup():
+    answer = {"message": {"content": " is"}, "logprobs": _logprobs((" is", 1.0))}
+    transport = Recorder([answer])
+    OllamaBackend("m", transport=transport, options={"num_gpu": 0, "temperature": 2}).next_tokens(ASK, "x")
+    assert transport.requests[0][1]["options"] == {"num_gpu": 0, "temperature": 0.0, "num_predict": 1, "seed": 0}

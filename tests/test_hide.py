@@ -168,7 +168,7 @@ def test_a_new_opening_is_tried_when_the_first_leads_nowhere(keys):
     class TwoOpenings(ScriptedBackend):
         openings = iter(["Bad start", "Good start"])
 
-        def start(self, messages):
+        def start(self, messages, pieces=8):
             return next(self.openings)
 
     script = {

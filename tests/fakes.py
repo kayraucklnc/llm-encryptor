@@ -23,9 +23,12 @@ class FakeBackend:
         self._forced = forced or {}
         self.calls = 0
 
-    def start(self, messages):
+    def reset(self):
+        self.resets = getattr(self, "resets", 0) + 1
+
+    def start(self, messages, pieces=8):
         self.calls += 1
-        return "The sea was"
+        return " ".join(random.Random(self._seed).choices(VOCABULARY, k=max(3, pieces))).capitalize()
 
     def next_tokens(self, messages, prefix):
         self.calls += 1
@@ -59,7 +62,10 @@ class ScriptedBackend:
         self._opening = opening
         self.prefixes: list[str] = []
 
-    def start(self, messages):
+    def reset(self):
+        pass
+
+    def start(self, messages, pieces=8):
         return self._opening
 
     def next_tokens(self, messages, prefix):

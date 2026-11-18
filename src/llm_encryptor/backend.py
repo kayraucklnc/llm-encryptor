@@ -25,8 +25,12 @@ class BackendError(RuntimeError):
 
 
 class Backend(Protocol):
-    def start(self, messages: Sequence[Message]) -> str:
-        """The first few words of a reply to ``messages``."""
+    def start(self, messages: Sequence[Message], pieces: int = 8) -> str:
+        """The start of a reply to ``messages``: about ``pieces`` tokens of it."""
+        ...
+
+    def reset(self) -> None:
+        """Forget everything cached, so the next answers do not depend on earlier ones."""
         ...
 
     def next_tokens(self, messages: Sequence[Message], prefix: str) -> Sequence[Choice]:
