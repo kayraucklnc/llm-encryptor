@@ -102,15 +102,19 @@ class DenseBox:
     def __init__(self, dense_key: bytes) -> None:
         self._aead = AESCCM(dense_key, tag_length=DENSE_TAG_LEN)
 
-    def seal(self, plaintext: bytes, opening: str) -> bytes:
-        salt = os.urandom(DENSE_SALT_LEN)
+    def seal(self, plaintext: bytes, opening: str, salt_len: int = DENSE_SALT_LEN) -> bytes:
+        salt = os.urandom(salt_len)
         return salt + self._aead.encrypt(_dense_nonce(opening, salt), plaintext, None)
 
-    def open(self, blob: bytes, opening: str) -> bytes | None:
-        """Return the plaintext, or None when the blob is not authentic."""
-        if len(blob) <= DENSE_OVERHEAD:
+    def open(self, blob: bytes, opening: str, salt_len: int = DENSE_SALT_LEN) -> bytes | None:
+        """Return the plaintext, or None when the blob is not authentic.
+
+        A text with a short opening carries more random bytes instead, because
+        a few opening words repeat too easily to keep nonces apart.
+        """
+        if len(blob) <= salt_len + DENSE_TAG_LEN:
             return None
-        salt, sealed = blob[:DENSE_SALT_LEN], blob[DENSE_SALT_LEN:]
+        salt, sealed = blob[:salt_len], blob[salt_len:]
         try:
             return self._aead.decrypt(_dense_nonce(opening, salt), sealed, None)
         except InvalidTag:
@@ -119,4 +123,4 @@ class DenseBox:
 
 def _dense_nonce(opening: str, salt: bytes) -> bytes:
     digest = hashlib.sha256(_DENSE_LABEL + opening.encode("utf-8")).digest()
-    return digest[: _DENSE_NONCE_LEN - DENSE_SALT_LEN] + salt
+    return digest[: _DENSE_NONCE_LEN - len(salt)] + salt

@@ -80,11 +80,20 @@ installed model, or `$LLM_ENCRYPTOR_MODEL`). Any model Ollama runs will do.
 For compact texts both sides must use the same model, so tell your friend
 which one.
 
-**Density.** Menu item 5, or `--tight`. Tight treats every word the model
-finds plausible as about equally likely, which hides more bits per word. In
-tests a 39-character secret took about 95–150 words instead of 190–230; very
-short secrets gain little. The text reads less smoothly. The reader detects
-the density by itself.
+**Density.** Menu item 5 cycles through three settings, or use `--density`.
+The reader detects the density by itself.
+
+| Density | 12-character secret | 39-character secret | The text |
+|---|---|---|---|
+| natural | about 90–165 words | about 190–230 words | reads best |
+| tight | about 100 words | about 95–150 words | less smooth |
+| max | about 30 words | about 52–62 words | nonsense |
+
+Tight treats every word the model finds plausible as about equally likely.
+Max counts every token the model lists the same, however unlikely, stops the
+moment the last bit is in, and opens with 4 free words instead of 16. At that
+point the text no longer hides that something is odd; it only keeps the
+secret unreadable.
 
 Other options: `--robust`, `--host URL` (or `$OLLAMA_HOST`); the password can
 come from `$LLM_ENCRYPTOR_PASSWORD` for scripts. `hide --secret "…"` puts the
@@ -105,8 +114,10 @@ bits must be hidden. For "meet at noon" in the compact format:
 That is 104 bits, about 75 words, plus 16 free opening words and the words
 needed to finish the last sentence. One cover word per secret letter is out
 of reach for text that should read naturally: a letter is 3–5 bits and a
-natural word carries about 1.4. The tight density trades smoothness for more
-bits per word. What is left to gain is compressing the secret with the model
+natural word carries about 1.4. The tight and max densities trade sense for
+more bits per word: max reaches about 4 bits a word, which is close to the
+ceiling here, because Ollama reports only a model's 20 likeliest next tokens
+(4.3 bits). What is left to gain is compressing the secret with the model
 itself (roughly 2 bits a letter instead of 4.3), which is not built yet.
 
 ## How it works
@@ -123,7 +134,7 @@ the current interval according to their probability, and the token whose share
 contains the point is written. The reader replays the model over the text,
 follows the same intervals and reads the bits off the final one.
 
-- The first 16 words are written freely to your instructions and carry
+- The first 16 words (4 at max density) are written freely to your instructions and carry
   nothing. They set topic and tone; the coded part continues them. That is why
   the reader needs no prompt, and why revising works. It also means the text
   can drift from your instructions later on.
@@ -137,7 +148,8 @@ follows the same intervals and reads the bits off the final one.
   thrown away and started again.
 - The secret is packed with a fixed Huffman code before it is encrypted.
   Overhead is 6 bytes: 2 random bytes and a 4-byte tag. The rest of the nonce
-  is a hash of the opening words.
+  is a hash of the opening words. Max density sends 4 random bytes, because
+  a 4-word opening repeats too easily to keep nonces apart on its own.
 
 **Robust.** The text is split into blocks of three words; HMAC-SHA256 of each
 block gives two bits. While the model writes, the app samples its next tokens

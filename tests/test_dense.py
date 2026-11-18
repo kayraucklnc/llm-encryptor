@@ -6,8 +6,9 @@ from fakes import FakeBackend
 from llm_encryptor.backend import Choice
 from llm_encryptor.crypto import DENSE_OVERHEAD, DenseBox
 from llm_encryptor.dense import (
+    MAX,
     NATURAL,
-    OPENING_WORDS,
+    NATURAL_OPENING,
     TIGHT,
     WOBBLE,
     DenseError,
@@ -37,8 +38,21 @@ def test_secret_round_trips(keys, secret):
 def test_tight_texts_read_back_without_being_told(keys):
     backend = FakeBackend(seed=21)
     secret = "a longer secret, so that the difference shows clearly"
-    tight = write_dense(secret, keys, backend, ASK, tight=True)
+    tight = write_dense(secret, keys, backend, ASK, density="tight")
     assert read_dense(tight, keys, backend) == secret
+
+
+def test_max_density_uses_every_token_and_stops_at_once(keys):
+    backend = FakeBackend(seed=22)
+    secret = "a longer secret, so that the difference shows clearly"
+    natural = write_dense(secret, keys, backend, ASK)
+    shortest = write_dense(secret, keys, backend, ASK, density="max")
+    assert read_dense(shortest, keys, backend) == secret
+    assert len(shortest.split()) < len(natural.split())
+    choices = [Choice(" a", 0.9), Choice(" b", 0.05), Choice(" c", 0.001), Choice(" d", 0.0001)]
+    assert shares(options(choices, "x."), MAX) == [1, 1, 1, 0]
+    pieces = options([Choice("ly", 0.01), Choice(" and", 0.9)], "friend")
+    assert shares(pieces, MAX) == [1, 1] and shares(pieces, NATURAL) == [16, 0]
     choices = [Choice(" a", 0.7), Choice(" b", 0.2), Choice(" c", 0.02), Choice(" d", 0.005)]
     assert shares(options(choices, "x."), TIGHT) == [2, 1, 1, 0]
 
@@ -67,14 +81,14 @@ def test_text_after_the_message_is_ignored(keys):
 def test_a_changed_word_recovers_nothing(keys):
     backend = FakeBackend(seed=6)
     words = write_dense("top secret", keys, backend, ASK).split(" ")
-    words[OPENING_WORDS + 3] = "tampered"
+    words[NATURAL_OPENING + 3] = "tampered"
     with pytest.raises(DenseError):
         read_dense(" ".join(words), keys, backend)
 
 
 def test_too_short_a_text_is_refused(keys):
     with pytest.raises(DenseError, match="too short"):
-        read_dense("Only a few words here.", keys, FakeBackend())
+        read_dense("Far too short.", keys, FakeBackend())
 
 
 def test_progress_reaches_the_whole_payload(keys):
@@ -163,14 +177,14 @@ def test_model_with_nothing_to_say_is_an_error(keys):
 
 def test_a_probability_near_a_level_is_read_both_ways(keys):
     """The reader sees one probability just across a boundary and still succeeds."""
-    boundary = NATURAL[1][0]
+    boundary = NATURAL.levels[1][0]
 
     class Shifted(FakeBackend):
         shift = 0.0
 
         def next_tokens(self, messages, prefix, attempt=0):
             choices = super().next_tokens(messages, prefix, attempt)
-            if len(prefix.split()) != OPENING_WORDS + 2:
+            if len(prefix.split()) != NATURAL_OPENING + 2:
                 return choices
             return [Choice(c.text, boundary + self.shift if c.probability == 0.25 else c.probability) for c in choices]
 
@@ -196,8 +210,8 @@ def test_compact_session_revises_and_is_shorter(keys):
 def test_opening_is_the_first_words():
     text = " ".join(f"w{i}" for i in range(40)) + "."
     opening, rest = split_opening("  " + text.replace(" ", "\n", 3))
-    assert opening == " ".join(f"w{i}" for i in range(OPENING_WORDS))
-    assert rest.startswith(f" w{OPENING_WORDS} ")
+    assert opening == " ".join(f"w{i}" for i in range(NATURAL_OPENING))
+    assert rest.startswith(f" w{NATURAL_OPENING} ")
 
 
 def test_flatten():
@@ -255,7 +269,7 @@ def test_a_word_is_only_finished_the_likely_way():
 
 
 def test_borderline_probabilities_are_flagged():
-    edge = NATURAL[-1][0]
+    edge = NATURAL.levels[-1][0]
     choices = [Choice(" a", edge * (1 + WOBBLE / 2)), Choice(" b", edge * (1 - WOBBLE / 2)), Choice(" c", 0.9)]
     found = options(choices, "x.")
     assert shares(found) == [1, 0, 16]

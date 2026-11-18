@@ -14,7 +14,7 @@ from rich.text import Text
 from .app import Settings, run_app
 from .backend import Backend, BackendError, Message
 from .codec import RevealError, reveal_with_keys
-from .dense import read_dense, write_dense
+from .dense import DENSITIES, read_dense, write_dense
 from .embed import EmbedConfig, EmbedError
 from .hide import hide, validate_secret
 from .ollama import DEFAULT_HOST
@@ -65,10 +65,10 @@ def _parser() -> argparse.ArgumentParser:
         help="write a longer text that can be read without a model",
     )
     shared.add_argument(
-        "--tight",
-        action="store_true",
+        "--density",
+        choices=list(DENSITIES),
         default=unset,
-        help="compact format: fewer words, less natural wording",
+        help="compact format: tight is shorter and reads less smoothly; max is shortest and nonsense",
     )
     shared.add_argument(
         "--temperature", type=float, default=unset, help="robust format: how freely the model writes"
@@ -95,7 +95,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _menu(args: argparse.Namespace, io: Io) -> None:
     _prepare(args, io)
-    settings = Settings(_host(args), _model(args, io), _compact(args), _tight(args))
+    settings = Settings(_host(args), _model(args, io), _compact(args), _density(args))
     run_app(io, settings)
 
 
@@ -106,7 +106,7 @@ def _hide(args: argparse.Namespace, io: Io) -> None:
     conversation: list[Message] = [{"role": "user", "content": args.about}]
     with progress(io) as on_progress:
         if _compact(args):
-            cover = write_dense(secret, keys, backend, conversation, on_progress, tight=_tight(args))
+            cover = write_dense(secret, keys, backend, conversation, on_progress, density=_density(args))
         else:
             cover = hide(secret, keys, backend, conversation, _config(args), on_progress)
     io.errors.print(Text(reader_needs(backend, _compact(args)), style="dim"))
@@ -160,8 +160,8 @@ def _prepare(args: argparse.Namespace, io: Io) -> None:
         io.prepare(io, _host(args))
 
 
-def _tight(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "tight", False))
+def _density(args: argparse.Namespace) -> str:
+    return getattr(args, "density", "natural")
 
 
 def _compact(args: argparse.Namespace) -> bool:

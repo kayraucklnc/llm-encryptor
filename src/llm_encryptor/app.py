@@ -28,8 +28,9 @@ from .words import split_words
 
 DEFAULT_TOPIC = "a friendly note to a friend about how the week has been"
 _DENSITIES = {
-    False: "natural (reads best)",
-    True: "tight (fewer words for longer secrets; reads less smoothly)",
+    "natural": "natural (reads best)",
+    "tight": "tight (fewer words for longer secrets; reads less smoothly)",
+    "max": "max (shortest possible; the text is nonsense)",
 }
 _FORMATS = {
     True: "compact (short text; the reader needs the same model)",
@@ -42,7 +43,7 @@ class Settings:
     host: str
     model: str
     compact: bool = True
-    tight: bool = False
+    density: str = "natural"
     keys: Keys | None = None
 
 
@@ -54,7 +55,7 @@ def run_app(io: Io, settings: Settings) -> None:
             "Decrypt a message",
             f"Model: {settings.model}",
             f"Format: {_FORMATS[settings.compact]}",
-            f"Density: {_DENSITIES[settings.tight]}",
+            f"Density: {_DENSITIES[settings.density]}",
             "Change password",
             "Quit",
         ]
@@ -94,7 +95,7 @@ def _encrypt(io: Io, settings: Settings) -> Settings:
         settings.keys,
         io.make_backend(settings.model, settings.host),
         compact=settings.compact,
-        tight=settings.tight,
+        density=settings.density,
     )
     request = io.ask("What should the text be about? (Enter for a friendly note) ").strip()
     request = request or DEFAULT_TOPIC
@@ -150,7 +151,8 @@ def _switch_format(io: Io, settings: Settings) -> Settings:
 def _switch_density(io: Io, settings: Settings) -> Settings:
     if not settings.compact:
         raise UserError("Density only applies to the compact format (item 4).")
-    return replace(settings, tight=not settings.tight)
+    names = list(_DENSITIES)
+    return replace(settings, density=names[(names.index(settings.density) + 1) % len(names)])
 
 
 def _change_password(io: Io, settings: Settings) -> Settings:

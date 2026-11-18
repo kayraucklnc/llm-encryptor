@@ -32,20 +32,46 @@ from dataclasses import dataclass
 
 from .backend import Backend, Choice, Message
 from .codec import RevealError
-from .crypto import DENSE_OVERHEAD, MAX_SECRET_BYTES, DenseBox, Keys
+from .crypto import DENSE_SALT_LEN, DENSE_TAG_LEN, MAX_SECRET_BYTES, DenseBox, Keys
 from .embed import EmbedError, Progress, ProgressCallback
 from .textcode import pack, unpack
 from .words import complete_word_ends, is_word_char, split_words
 
+
 # All of these are part of the format: sender and reader must agree on them.
-OPENING_WORDS = 16
-# A token's share of the interval, by its probability: (at least, shares).
-# "natural" follows the model's own preferences. "tight" treats every word
-# the model finds at all plausible as nearly equally likely, which hides more
-# bits per word and reads less smoothly. The reader tries both.
-Levels = tuple[tuple[float, int], ...]
-NATURAL: Levels = ((0.5, 16), (0.25, 8), (0.12, 4), (0.06, 2), (0.03, 1))
-TIGHT: Levels = ((0.3, 2), (0.01, 1))
+@dataclass(frozen=True)
+class Density:
+    """How the interval is shared among the next tokens.
+
+    ``levels`` gives a token's share by its probability: (at least, shares).
+    ``piece_level`` is how likely a token must be to continue a word (this
+    avoids misspellings). ``finish_sentence`` keeps writing to the end of the
+    sentence once the message is in.
+    """
+
+    levels: tuple[tuple[float, int], ...]
+    piece_level: float = 0.25
+    finish_sentence: bool = True
+    # The free words at the start, and the random bytes sent along. Fewer
+    # opening words repeat more easily, so they come with more random bytes.
+    opening_words: int = 16
+    salt_len: int = DENSE_SALT_LEN
+
+
+# The reader tries each of these, so the writer is free to choose.
+DENSITIES = {
+    # Follows the model's own preferences: reads best.
+    "natural": Density(((0.5, 16), (0.25, 8), (0.12, 4), (0.06, 2), (0.03, 1))),
+    # Every plausible word is about equally likely: more bits per word.
+    "tight": Density(((0.3, 2), (0.01, 1))),
+    # Every token the model lists counts the same, however unlikely, and the
+    # text stops the moment the message is in: shortest, and it reads as nonsense.
+    "max": Density(
+        ((0.0005, 1),), piece_level=0.0, finish_sentence=False, opening_words=4, salt_len=4
+    ),
+}
+NATURAL, TIGHT, MAX = DENSITIES["natural"], DENSITIES["tight"], DENSITIES["max"]
+NATURAL_OPENING = NATURAL.opening_words
 OPENING_PROMPT = (
     "You are a skilled writer. Write what the user asks for as natural, flowing prose "
     "in plain text. Name the subject within the first ten words. Always write at least "
@@ -58,8 +84,6 @@ _INSIST: Message = {
     "role": "user",
     "content": "That was too short. Write the full text now: at least 150 words of prose.",
 }
-# A word is only continued by a token at least this likely (avoids misspellings).
-WORD_PIECE_LEVEL = 0.25
 # A run of this many words may not appear twice: it stops the model going in circles.
 NO_REPEAT_WORDS = 3
 # How far, relatively, a probability may differ between writer and reader.
@@ -74,12 +98,12 @@ CONTINUE: tuple[Message, ...] = (
     {"role": "user", "content": "Write a long, detailed piece of at least 800 words."},
 )
 
-_OPENING_PIECES = 4 * OPENING_WORDS
+_OPENING_PIECES = 64
 _OPENING_TRIES = 5
 _LOOKUP_TRIES = 12
 _WRITE_TRIES = 3
 _PADDING_BITS = 8192
-_MAX_BITS = 8 * (DENSE_OVERHEAD + MAX_SECRET_BYTES + 1)
+_MAX_BITS = 8 * (8 + DENSE_TAG_LEN + MAX_SECRET_BYTES + 1)
 _TOKENS_PER_BIT = 3
 _TAIL_TOKENS = 60
 # A healthy text hides a bit every token or two; give up on one that hides none for this long.
@@ -120,13 +144,13 @@ def flatten(text: str) -> str:
     return _SPACE.sub(" ", text)
 
 
-def split_opening(text: str) -> tuple[str, str]:
+def split_opening(text: str, words: int = NATURAL_OPENING) -> tuple[str, str]:
     """The free opening words of a text, and everything after them."""
     flat = flatten(text).strip()
     ends = complete_word_ends(flat)
-    if len(ends) < OPENING_WORDS:
+    if len(ends) < words:
         raise DenseError("The text is too short to hold a message.")
-    cut = ends[OPENING_WORDS - 1]
+    cut = ends[words - 1]
     return flat[:cut], flat[cut:]
 
 
@@ -140,10 +164,10 @@ class Option:
     extends_word: bool = False
 
 
-def _share(probability: float, extends_word: bool, levels: Levels) -> int:
-    if extends_word and probability < WORD_PIECE_LEVEL:
+def _share(probability: float, extends_word: bool, density: Density) -> int:
+    if extends_word and probability < density.piece_level:
         return 0
-    for at_least, share in levels:
+    for at_least, share in density.levels:
         if probability >= at_least:
             return share
     return 0
@@ -196,9 +220,9 @@ def _without_repeats(found: Sequence[Option], written: str) -> list[Option]:
     return fresh
 
 
-def shares(found: Sequence[Option], levels: Levels = NATURAL) -> list[int]:
+def shares(found: Sequence[Option], density: Density = NATURAL) -> list[int]:
     """How the interval is shared among the options."""
-    result = [_share(o.probability, o.extends_word, levels) for o in found]
+    result = [_share(o.probability, o.extends_word, density) for o in found]
     if found and not any(result):
         # Nothing stands out: let the likeliest token through.
         best = max(range(len(found)), key=lambda i: (found[i].probability, found[i].token))
@@ -206,12 +230,12 @@ def shares(found: Sequence[Option], levels: Levels = NATURAL) -> list[int]:
     return result
 
 
-def _other_share(option: Option, levels: Levels = NATURAL) -> int | None:
+def _other_share(option: Option, density: Density = NATURAL) -> int | None:
     """The share this option would get just across a nearby level boundary."""
-    here = _share(option.probability, option.extends_word, levels)
+    here = _share(option.probability, option.extends_word, density)
     nearby = {
-        _share(option.probability * (1 - WOBBLE), option.extends_word, levels),
-        _share(option.probability * (1 + WOBBLE), option.extends_word, levels),
+        _share(option.probability * (1 - WOBBLE), option.extends_word, density),
+        _share(option.probability * (1 + WOBBLE), option.extends_word, density),
     }
     return next(iter(nearby - {here}), None)
 
@@ -223,11 +247,11 @@ def write_dense(
     conversation: Sequence[Message],
     on_progress: ProgressCallback | None = None,
     rng: random.Random | None = None,
-    tight: bool = False,
+    density: str = "natural",
 ) -> str:
     """A text that opens as ``conversation`` asks and carries ``secret``."""
     rng = rng or random.SystemRandom()
-    levels = TIGHT if tight else NATURAL
+    chosen = DENSITIES[density]
     asked = [{"role": "system", "content": OPENING_PROMPT}, *conversation]
     # What a model server has cached changes its numbers slightly. Writer and
     # reader therefore both start from a freshly loaded model, and every text
@@ -235,9 +259,9 @@ def write_dense(
     # making progress, is thrown away and begun again with a new opening.
     problem = "The finished text did not decode back to the secret."
     for _ in range(_WRITE_TRIES):
-        opening = _opening(backend, asked)
+        opening = _opening(backend, asked, chosen.opening_words)
         try:
-            text = _code(secret, keys, backend, opening, on_progress, rng, levels)
+            text = _code(secret, keys, backend, opening, on_progress, rng, chosen)
             if read_dense(text, keys, backend) == secret:
                 return text
         except DenseError:
@@ -258,10 +282,10 @@ def _code(
     text: str,
     on_progress: ProgressCallback | None,
     rng: random.Random,
-    levels: Levels,
+    density: Density,
 ) -> str:
     notify = on_progress or (lambda _progress: None)
-    payload = DenseBox(keys.dense).seal(pack(secret), text)
+    payload = DenseBox(keys.dense).seal(pack(secret), text, density.salt_len)
     wanted = 8 * len(payload)
     # The point to home in on: the payload, then random digits so that the
     # words after the payload are still sampled the way the model would.
@@ -274,7 +298,7 @@ def _code(
     backend.reset()
     for step in range(_TOKENS_PER_BIT * wanted + _TAIL_TOKENS):
         found = _lookup(backend, text, first=step == 0)
-        choices = [(o.token, share) for o, share in zip(found, shares(found, levels)) if share]
+        choices = [(o.token, share) for o, share in zip(found, shares(found, density)) if share]
         if not choices:
             raise _Stuck("The model stopped before the whole message was in the text.")
         total = sum(count for _, count in choices)
@@ -293,7 +317,8 @@ def _code(
         notify(Progress(text, agreed, wanted))
         if agreed == wanted:
             done_at = step if done_at is None else done_at
-            if _SENTENCE_END.search(text.rstrip()) or step - done_at >= _TAIL_TOKENS:
+            ended = not density.finish_sentence or _SENTENCE_END.search(text.rstrip())
+            if ended or step - done_at >= _TAIL_TOKENS:
                 return text.rstrip()
         elif agreed > most:
             gained_at, most = step, agreed
@@ -304,7 +329,34 @@ def _code(
 
 def read_dense(text: str, keys: Keys, backend: Backend) -> str:
     """Recover the secret from a compact-format text by replaying the model."""
-    written, rest = split_opening(text)
+    box = DenseBox(keys.dense)
+    too_short = True
+    # Where the coded part starts depends on the density, so each opening
+    # length gets its own pass over the text. The usual one goes first.
+    for words in sorted({density.opening_words for density in DENSITIES.values()}, reverse=True):
+        try:
+            opening, steps = _replay(text, backend, words)
+        except DenseError:
+            continue
+        too_short = False
+        for density in DENSITIES.values():
+            if density.opening_words != words:
+                continue
+            for reading in _readings(steps, density):
+                secret = _open(box, _bits(steps, reading), opening, density.salt_len)
+                if secret is not None:
+                    return secret
+    if too_short:
+        raise DenseError("The text is too short to hold a message.")
+    raise DenseError(
+        "No hidden message found. The password or model may be wrong, "
+        "or the text was changed."
+    )
+
+
+def _replay(text: str, backend: Backend, words: int) -> tuple[str, list[tuple[list[Option], int]]]:
+    """Follow the text token by token: what the model offered, and what was written."""
+    written, rest = split_opening(text, words)
     opening = written
     steps: list[tuple[list[Option], int]] = []
     backend.reset()
@@ -324,30 +376,20 @@ def read_dense(text: str, keys: Keys, backend: Backend) -> str:
         steps.append((found, index))
         rest = rest[len(flatten(written + token)) - len(flatten(written)) :]
         written += token
-
-    box = DenseBox(keys.dense)
-    for levels in (NATURAL, TIGHT):
-        for reading in _readings(steps, levels):
-            secret = _open(box, _bits(steps, reading), opening)
-            if secret is not None:
-                return secret
-    raise DenseError(
-        "No hidden message found. The password or model may be wrong, "
-        "or the text was changed."
-    )
+    return opening, steps
 
 
-def _readings(steps: Sequence[tuple[list[Option], int]], levels: Levels):
+def _readings(steps: Sequence[tuple[list[Option], int]], density: Density):
     """Ways to read the shares: as seen first, then with borderline ones moved.
 
     A token that was written must have had a share, so a written token we see
     below the lowest level is moved up without counting as a doubt.
     """
-    base = [shares(found, levels) for found, _ in steps]
+    base = [shares(found, density) for found, _ in steps]
     doubts = []
     for at, (found, chosen) in enumerate(steps):
         for i, option in enumerate(found):
-            other = _other_share(option, levels)
+            other = _other_share(option, density)
             if other is None:
                 continue
             if i == chosen and base[at][i] == 0:
@@ -379,9 +421,9 @@ def _bits(steps: Sequence[tuple[list[Option], int]], reading: Sequence[Sequence[
     )
 
 
-def _open(box: DenseBox, blob: bytes, opening: str) -> str | None:
-    for length in range(DENSE_OVERHEAD + 1, len(blob) + 1):
-        plaintext = box.open(blob[:length], opening)
+def _open(box: DenseBox, blob: bytes, opening: str, salt_len: int) -> str | None:
+    for length in range(salt_len + DENSE_TAG_LEN + 1, len(blob) + 1):
+        plaintext = box.open(blob[:length], opening, salt_len)
         if plaintext is not None:
             try:
                 return unpack(plaintext)
@@ -406,13 +448,13 @@ def _lookup(backend: Backend, written: str, first: bool = False) -> list[Option]
     return []
 
 
-def _opening(backend: Backend, messages: Sequence[Message]) -> str:
+def _opening(backend: Backend, messages: Sequence[Message], words: int) -> str:
     asked = list(messages)
     for _ in range(_OPENING_TRIES):
         sample = flatten(backend.start(asked, _OPENING_PIECES)).strip()
         ends = complete_word_ends(sample)
-        if len(ends) >= OPENING_WORDS:
-            return sample[: ends[OPENING_WORDS - 1]]
+        if len(ends) >= words:
+            return sample[: ends[words - 1]]
         if sample:
             asked = [*messages, {"role": "assistant", "content": sample}, _INSIST]
     raise EmbedError(

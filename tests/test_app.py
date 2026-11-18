@@ -205,10 +205,13 @@ def test_copy_and_paste_use_the_first_working_tool(monkeypatch):
     assert terminal.read_clipboard() is None
 
 
-def test_density_can_be_switched_for_compact_only(clipboard):
-    code, shown, _ = run(["5", "1", "a rather long secret message", "", "", "2", "", "4", "5", "q"], hidden=[PASSWORD, PASSWORD])
+def test_density_cycles_and_applies_to_compact_only(clipboard):
+    lines = ["5", "5", "1", "a rather long secret message", "", "", "2", "", "5", "4", "5", "q"]
+    code, shown, _ = run(lines, hidden=[PASSWORD, PASSWORD])
     assert code == 0
-    assert "Density: tight" in shown and "a rather long secret message" in shown.split("hidden message")[1]
+    assert "Density: tight" in shown and "Density: max" in shown
+    assert "a rather long secret message" in shown.split("hidden message")[1]
+    assert shown.count("Density: natural") >= 2   # at the start, and after cycling round
     assert "only applies to the compact format" in shown
 
 
