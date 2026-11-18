@@ -224,8 +224,9 @@ def test_arrows_move_and_enter_chooses():
     drawn = []
     items = ["Encrypt", "Decrypt", "Quit"]
     assert terminal.pick("menu", items, 0, _press(b"\x1b[B", b"\x1b[B", b"\x1b[A", b"\r"), drawn.append) == 1
-    assert "❯ 1  Encrypt" in drawn[0] and "❯ 2  Decrypt" in drawn[-1]
+    assert "❯ 1  Encrypt" in drawn[0] and "❯ 2  Decrypt" in drawn[-2]
     assert drawn[1].startswith("\x1b[4A")  # redrawn in place, not appended
+    assert drawn[-1] == "\x1b[4A\x1b[J"   # and wiped once a choice is made
     assert terminal.pick("menu", items, 0, _press(b"\x1b[A", b"\n"), drawn.append) == 2  # wraps around
     assert terminal.pick("menu", items, 1, _press(b"j", b"k", b"k", b"\r"), drawn.append) == 0
 

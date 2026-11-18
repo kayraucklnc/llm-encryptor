@@ -161,18 +161,25 @@ def pick(
         key = read_key()
         if key in _UP:
             at = (at - 1) % len(items)
-        elif key in _DOWN:
+            continue
+        if key in _DOWN:
             at = (at + 1) % len(items)
-        elif key in _ENTER:
-            return at
-        elif key in _LEAVE:
-            return None
-        elif key.isdigit() and 1 <= int(key) <= len(items):
-            return int(key) - 1
-        elif key == b"\x03":
+            continue
+        if key == b"\x03":
             raise KeyboardInterrupt
-        elif key in (b"\x04", b""):
+        if key in (b"\x04", b""):
             raise EOFError
+        if key in _ENTER:
+            chosen: int | None = at
+        elif key in _LEAVE:
+            chosen = None
+        elif key.isdigit() and 1 <= int(key) <= len(items):
+            chosen = int(key) - 1
+        else:
+            continue
+        # Wipe the menu, so whatever comes next (or the menu again) takes its place.
+        write(f"\x1b[{len(lines)}A\x1b[J")
+        return chosen
 
 
 def arrow_menu(title: str, items: list[str], start: int = 0) -> int | None:
