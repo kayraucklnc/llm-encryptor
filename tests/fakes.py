@@ -30,7 +30,7 @@ class FakeBackend:
         self.calls += 1
         return " ".join(random.Random(self._seed).choices(VOCABULARY, k=max(3, pieces))).capitalize()
 
-    def next_tokens(self, messages, prefix):
+    def next_tokens(self, messages, prefix, attempt=0):
         self.calls += 1
         chooser = random.Random(f"{self._seed}|{prefix[-30:]}")
         words = chooser.sample(VOCABULARY, len(_WEIGHTS))
@@ -68,7 +68,7 @@ class ScriptedBackend:
     def start(self, messages, pieces=8):
         return self._opening
 
-    def next_tokens(self, messages, prefix):
+    def next_tokens(self, messages, prefix, attempt=0):
         self.prefixes.append(prefix)
         return self._script.get(prefix, [Choice("", 1.0)])
 

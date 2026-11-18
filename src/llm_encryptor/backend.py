@@ -33,6 +33,14 @@ class Backend(Protocol):
         """Forget everything cached, so the next answers do not depend on earlier ones."""
         ...
 
-    def next_tokens(self, messages: Sequence[Message], prefix: str) -> Sequence[Choice]:
-        """The likeliest next tokens of a reply that so far reads ``prefix``."""
+    def next_tokens(
+        self, messages: Sequence[Message], prefix: str, attempt: int = 0
+    ) -> Sequence[Choice]:
+        """The likeliest next tokens of a reply that so far reads ``prefix``.
+
+        A backend may be unable to list them when the model's own pick is to
+        end the reply; it then returns only the empty choice. A higher
+        ``attempt`` asks again in a way that may get past that, and must give
+        the same answer every time for the same attempt number.
+        """
         ...

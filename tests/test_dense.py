@@ -82,8 +82,8 @@ def test_writer_tries_again_when_its_text_does_not_read_back(keys):
         def reset(self):
             NoisyAtFirst.passes += 1
 
-        def next_tokens(self, messages, prefix):
-            choices = super().next_tokens(messages, prefix)
+        def next_tokens(self, messages, prefix, attempt=0):
+            choices = super().next_tokens(messages, prefix, attempt)
             if NoisyAtFirst.passes == 1:
                 return [Choice(c.text, c.probability * (0.5 if i % 2 else 1.6)) for i, c in enumerate(choices)]
             return choices
@@ -96,8 +96,8 @@ def test_writer_tries_again_when_its_text_does_not_read_back(keys):
 
 def test_writer_gives_up_when_nothing_reads_back(keys):
     class NeverTheSame(FakeBackend):
-        def next_tokens(self, messages, prefix):
-            return [Choice(c.text, random.random()) for c in super().next_tokens(messages, prefix)]
+        def next_tokens(self, messages, prefix, attempt=0):
+            return [Choice(c.text, random.random()) for c in super().next_tokens(messages, prefix, attempt)]
 
     with pytest.raises(EmbedError, match="did not decode"):
         write_dense("top secret", keys, NeverTheSame(seed=9), ASK)
@@ -128,9 +128,23 @@ def test_a_too_short_reply_is_asked_for_again(keys):
     assert "too short" in retry[-1]["content"]
 
 
+def test_a_model_that_wants_to_stop_is_asked_what_else_it_could_write(keys):
+    class StopsOften(FakeBackend):
+        """Refuses to list tokens on the first two attempts at every third step."""
+
+        def next_tokens(self, messages, prefix, attempt=0):
+            if len(prefix) % 3 == 0 and attempt < 2:
+                return [Choice("", 1.0)]
+            return super().next_tokens(messages, prefix, attempt)
+
+    backend = StopsOften(seed=13)
+    text = write_dense("top secret", keys, backend, ASK)
+    assert read_dense(text, keys, backend) == "top secret"
+
+
 def test_model_with_nothing_to_say_is_an_error(keys):
     class Stops(FakeBackend):
-        def next_tokens(self, messages, prefix):
+        def next_tokens(self, messages, prefix, attempt=0):
             return [Choice("", 1.0)]
 
     with pytest.raises(EmbedError, match="stopped before"):
@@ -144,8 +158,8 @@ def test_a_probability_near_a_level_is_read_both_ways(keys):
     class Shifted(FakeBackend):
         shift = 0.0
 
-        def next_tokens(self, messages, prefix):
-            choices = super().next_tokens(messages, prefix)
+        def next_tokens(self, messages, prefix, attempt=0):
+            choices = super().next_tokens(messages, prefix, attempt)
             if len(prefix.split()) != OPENING_WORDS + 2:
                 return choices
             return [Choice(c.text, boundary + self.shift if c.probability == 0.25 else c.probability) for c in choices]

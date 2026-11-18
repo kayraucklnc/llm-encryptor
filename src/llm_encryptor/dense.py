@@ -71,7 +71,7 @@ CONTINUE: tuple[Message, ...] = (
 
 _OPENING_PIECES = 4 * OPENING_WORDS
 _OPENING_TRIES = 5
-_LOOKUP_TRIES = 3
+_LOOKUP_TRIES = 12
 _WRITE_TRIES = 3
 _PADDING_BITS = 8192
 _MAX_BITS = 8 * (DENSE_OVERHEAD + MAX_SECRET_BYTES + 1)
@@ -354,8 +354,10 @@ def _continues(new_flat: str, old_flat: str, rest: str) -> bool:
 
 
 def _lookup(backend: Backend, written: str, first: bool = False) -> list[Option]:
-    for _ in range(_LOOKUP_TRIES):
-        found = options(backend.next_tokens(CONTINUE, written), written, first)
+    # When the model would rather stop, ask again (the same way on both sides)
+    # until it shows what else it could write.
+    for attempt in range(_LOOKUP_TRIES):
+        found = options(backend.next_tokens(CONTINUE, written, attempt), written, first)
         if found:
             return found
     return []

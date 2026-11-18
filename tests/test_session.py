@@ -17,9 +17,9 @@ def test_the_model_sees_the_earlier_version_when_revising(keys):
     seen = []
 
     class Spy(FakeBackend):
-        def next_tokens(self, messages, prefix):
+        def next_tokens(self, messages, prefix, attempt=0):
             seen.append(list(messages))
-            return super().next_tokens(messages, prefix)
+            return super().next_tokens(messages, prefix, attempt)
 
     first = Session("hi", keys, Spy(seed=2), compact=False).instruct("Write about Turkey.")
     first.instruct("Make it more friendly.")

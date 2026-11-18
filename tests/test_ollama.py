@@ -40,6 +40,17 @@ def test_next_tokens_sends_the_text_so_far_as_the_reply():
     assert body["stream"] is False
 
 
+def test_a_later_attempt_picks_at_random_with_its_own_seed():
+    answer = {"message": {"content": " is"}, "logprobs": _logprobs((" is", 1.0))}
+    transport = Recorder([answer])
+    backend = OllamaBackend("m", transport=transport)
+    backend.next_tokens(ASK, "The sea")
+    backend.next_tokens(ASK, "The sea", attempt=3)
+    first, later = (request[1]["options"] for request in transport.requests)
+    assert (first["temperature"], first["seed"]) == (0.0, 0)
+    assert later["temperature"] > 1 and later["seed"] == 3
+
+
 def test_control_tokens_mean_the_reply_ends():
     answer = {"logprobs": _logprobs((".", 0.4), ("<|im_end|>", 0.3), ("</s>", 0.1), ("<3", 0.1), ("<br>", 0.1))}
     choices = OllamaBackend("m", transport=Recorder([answer])).next_tokens(ASK, "The sea")
