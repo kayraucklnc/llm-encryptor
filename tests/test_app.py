@@ -91,9 +91,11 @@ def test_a_change_gives_a_new_text_with_the_same_secret(clipboard):
     original = clipboard.copy
     clipboard_copy = lambda text: (seen.append(text), original(text))[1]
     app.copy_text = clipboard_copy
-    lines = ["1", "s", "", "make it friendlier", "", "2", "", "q"]
+    # At natural density: the toy model opens every text alike, and a short text
+    # that opens like the one before it comes out the same.
+    lines = ["5", "5", "1", "s", "", "make it friendlier", "", "2", "", "q"]
     code, shown, _ = run(lines, hidden=[PASSWORD, PASSWORD])
-    assert code == 0
+    assert code == 0 and "Density: natural" in shown
     assert len(seen) == 2 and seen[0] != seen[1]
     assert shown.count("text to send") == 2 and "hidden message" in shown
 
@@ -241,12 +243,13 @@ def test_copy_and_paste_use_the_first_working_tool(monkeypatch):
 
 
 def test_density_cycles_and_applies_to_compact_only(clipboard):
-    lines = ["5", "5", "1", "a rather long secret message", "", "", "2", "", "5", "4", "5", "q"]
+    lines = ["5", "5", "5", "1", "a rather long secret message", "", "", "2", "", "5", "4", "5", "q"]
     code, shown, _ = run(lines, hidden=[PASSWORD, PASSWORD])
     assert code == 0
-    assert "Density: tight" in shown and "Density: max" in shown
+    assert "Density: tight" in shown and "Density: short" in shown and "Density: max" in shown
     assert "a rather long secret message" in shown.split("hidden message")[1]
-    assert shown.count("Density: natural") >= 2   # at the start, and after cycling round
+    assert "Density: natural" in shown
+    assert shown.count("Density: short") >= 2   # at the start, and after cycling round
     assert "only applies to the compact format" in shown
 
 
@@ -314,3 +317,4 @@ def test_app_uses_the_arrow_menu_when_there_is_one(clipboard):
 def test_arrows_need_a_real_terminal(monkeypatch):
     monkeypatch.setattr(terminal.sys.stdin, "isatty", lambda: False, raising=False)
     assert terminal.can_use_arrows() is False
+

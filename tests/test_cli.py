@@ -177,3 +177,4 @@ def test_models_are_listed():
     io, _, err, _ = make_io(models=())
     assert cli.main(["models"], io) == 1
     assert "ollama pull" in err.getvalue()
+

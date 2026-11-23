@@ -11,7 +11,7 @@ from rich.text import Text
 from .backend import BackendError
 from .codec import RevealError, reveal_with_keys
 from .crypto import Keys
-from .dense import read_dense
+from .dense import DEFAULT_DENSITY, read_dense
 from .embed import EmbedError
 from .session import Session
 from .terminal import (
@@ -30,8 +30,9 @@ _DOWNLOAD = "Download another model…"
 _OTHER_MODELS_TRIED = 4
 DEFAULT_TOPIC = "a friendly note to a friend about how the week has been"
 _DENSITIES = {
-    "natural": "natural (reads best)",
+    "natural": "natural (article-like prose, about 100 words)",
     "tight": "tight (fewer words for longer secrets; reads less smoothly)",
+    "short": "short (a casual message of about 30 words)",
     "max": "max (shortest possible; the text is nonsense)",
 }
 _FORMATS = {
@@ -45,7 +46,7 @@ class Settings:
     host: str
     model: str
     compact: bool = True
-    density: str = "natural"
+    density: str = DEFAULT_DENSITY
     keys: Keys | None = None
 
 

@@ -14,7 +14,7 @@ from rich.text import Text
 from .app import Settings, run_app
 from .backend import Backend, BackendError, Message
 from .codec import RevealError, reveal_with_keys
-from .dense import DENSITIES, read_dense, write_dense
+from .dense import DEFAULT_DENSITY, DENSITIES, read_dense, write_dense
 from .embed import EmbedConfig, EmbedError
 from .hide import hide, validate_secret
 from .ollama import DEFAULT_HOST
@@ -75,7 +75,8 @@ def _parser() -> argparse.ArgumentParser:
         "--density",
         choices=list(DENSITIES),
         default=unset,
-        help="compact format: tight is shorter and reads less smoothly; max is shortest and nonsense",
+        help="compact format: short (the default) is a casual message of about 30 words; natural "
+        "is article-like prose of about 100; tight reads less smoothly; max is shortest and nonsense",
     )
     shared.add_argument(
         "--temperature", type=float, default=unset, help="robust format: how freely the model writes"
@@ -168,7 +169,7 @@ def _prepare(args: argparse.Namespace, io: Io) -> None:
 
 
 def _density(args: argparse.Namespace) -> str:
-    return getattr(args, "density", "natural")
+    return getattr(args, "density", DEFAULT_DENSITY)
 
 
 def _compact(args: argparse.Namespace) -> bool:

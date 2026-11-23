@@ -1,6 +1,6 @@
 import pytest
 
-from llm_encryptor.textcode import _CODES, _FILLER, pack, unpack
+from llm_encryptor.textcode import _CODES, _FILLER, pack, pack_bits, unpack, unpack_bits
 
 MESSAGES = [
     "meet at noon",
@@ -49,3 +49,22 @@ def test_damaged_data_is_refused(damaged):
 
 
 _GOLDEN = "5bff59eb22aa33"
+
+
+@pytest.mark.parametrize("text", MESSAGES)
+def test_bits_round_trip(text):
+    bits = pack_bits(text)
+    assert set(bits) <= {"0", "1"}
+    assert unpack_bits(bits) == text
+
+
+def test_bits_carry_no_padding():
+    assert len(pack_bits("meet at noon")) == 1 + sum(len(_CODES[char]) for char in "meet at noon")
+    assert len(pack_bits("meet at noon")) < 8 * len(pack("meet at noon"))
+    assert pack_bits("日本語") == "1" + "".join(f"{byte:08b}" for byte in "日本語".encode())
+
+
+@pytest.mark.parametrize("bits", ["", pack_bits("meet at noon")[:-1], pack_bits("日本語")[:-3], "1" + "1" * 8])
+def test_cut_off_or_damaged_bits_are_refused(bits):
+    with pytest.raises(ValueError):
+        unpack_bits(bits)

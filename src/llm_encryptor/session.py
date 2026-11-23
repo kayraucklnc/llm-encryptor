@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 
 from .backend import Backend, Message
 from .crypto import Keys
-from .dense import write_dense
+from .dense import DEFAULT_DENSITY, write_dense
 from .embed import DEFAULT_CONFIG, EmbedConfig, ProgressCallback
 from .hide import hide
 
@@ -21,8 +21,8 @@ class Session:
     cover: str | None = None
     # Compact: short texts, but the reader needs the same model.
     compact: bool = True
-    # Compact only: natural, tight or max (see dense.DENSITIES).
-    density: str = "natural"
+    # Compact only: natural, tight, short or max (see dense.DENSITIES).
+    density: str = DEFAULT_DENSITY
 
     def instruct(self, instruction: str, on_progress: ProgressCallback | None = None) -> Session:
         """Write or revise the cover text; the secret stays embedded."""
