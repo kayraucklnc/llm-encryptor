@@ -39,6 +39,8 @@ from .terminal import copy_text, read_clipboard
 
 _BAR = 28
 _BITS_SHOWN = 56
+# How long the finished stages stay on the chat screen before they make room again.
+_LINGER = 1.5
 
 
 # --- the steps panel --------------------------------------------------------
@@ -481,7 +483,24 @@ class Chat(Page):
         yield Static("", id="status")
         yield Footer()
 
+    def show_steps(self, steps: Steps) -> None:
+        """The stages are only on screen while a message is on its way in or out."""
+        self.app.call_from_thread(self._stages, steps)
+
+    def _stages(self, steps: Steps) -> None:
+        panel = self.query_one(StepsPanel)
+        panel.show(steps)
+        panel.display = True
+        if steps.finished or steps.problem:
+            self.set_timer(_LINGER, self._put_stages_away)
+
+    def _put_stages_away(self) -> None:
+        panel = self.query_one(StepsPanel)
+        if panel.steps.finished or panel.steps.problem:  # Not if the next message has started.
+            panel.display = False
+
     def on_mount(self) -> None:
+        self.query_one(StepsPanel).display = False
         self._prompt()
         self.line_changed()
         waiting, self.early = self.early, []

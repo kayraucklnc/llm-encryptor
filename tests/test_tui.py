@@ -209,7 +209,10 @@ def test_two_people_chat_and_each_sees_both_conversations():
             await b.press("enter")
             await until(a, lambda: len(turns(ada)) == 2 and turns(ada)[-1].secret == "ok, bring the keys")
             assert [turn.who for turn in turns(ada)] == ["you", "Bo"]
-            assert ada.screen.query_one(StepsPanel).steps.secret == "ok, bring the keys"
+            panel = ada.screen.query_one(StepsPanel)
+            assert panel.steps.secret == "ok, bring the keys"
+            # The stages make room again once the message is through.
+            await until(a, lambda: not panel.display)
 
             await b.press("escape", "escape")
             await until(a, lambda: "Bo left" in status(ada))
