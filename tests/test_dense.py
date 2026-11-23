@@ -1,18 +1,22 @@
 import random
+from dataclasses import replace
 
 import pytest
-from fakes import FakeBackend
+from fakes import VOCABULARY, FakeBackend
 
 from llm_encryptor.backend import Choice
-from llm_encryptor.crypto import DENSE_OVERHEAD, DenseBox
+from llm_encryptor.crypto import DENSE_OVERHEAD, LEAN_TAG_BITS, DenseBox
 from llm_encryptor.dense import (
     MAX,
     NATURAL,
     NATURAL_OPENING,
+    SHORT,
     TIGHT,
     WOBBLE,
     DenseError,
+    _code,
     _Interval,
+    _opening,
     _other_share,
     flatten,
     options,
@@ -23,7 +27,7 @@ from llm_encryptor.dense import (
 )
 from llm_encryptor.embed import EmbedError, Progress
 from llm_encryptor.session import Session
-from llm_encryptor.textcode import pack
+from llm_encryptor.textcode import pack, pack_bits
 
 ASK = [{"role": "user", "content": "Write about the sea."}]
 
@@ -297,3 +301,116 @@ def test_dense_box(keys, other_keys):
     assert DenseBox(other_keys.dense).open(blob, "Once upon a time") is None
     assert box.open(blob[:DENSE_OVERHEAD], "Once upon a time") is None
     assert box.seal(b"same", "x") != box.seal(b"same", "x")
+
+
+# --- short density and the leaner sealing ----------------------------------
+
+
+@pytest.mark.parametrize("secret", ["hi", "Meet me at the old bridge at 9pm.", "şifre: çay 🫖 123"])
+def test_short_density_round_trips_and_is_shorter(keys, secret):
+    backend = FakeBackend(seed=31)
+    short = write_dense(secret, keys, backend, ASK, density="short")
+    assert read_dense(short, keys, backend) == secret
+    assert len(short.split()) < len(write_dense(secret, keys, backend, ASK).split())
+
+
+def test_short_density_ends_its_sentence_at_once(keys):
+    backend = FakeBackend(seed=32)
+    opening = _opening(backend, ASK, SHORT.opening_words)
+    for seed in range(20):
+        seen: list[Progress] = []
+        text = _code("top secret", keys, backend, opening, seen.append, random.Random(seed), SHORT)
+        assert text.endswith(".")
+        # From the moment the message is in: at most a word after a comma, then the full stop.
+        assert 1 <= len([p for p in seen if p.embedded == p.total]) <= 3
+
+
+def test_short_and_max_carry_only_a_tag_besides_the_secret(keys):
+    for density in ("short", "max"):
+        seen: list[Progress] = []
+        write_dense("hi", keys, FakeBackend(seed=33), ASK, seen.append, density=density)
+        assert seen[-1].total == len(pack_bits("hi")) + LEAN_TAG_BITS
+
+
+def test_short_shares_are_measured_against_the_likeliest_token():
+    choices = [Choice(" a", 0.6), Choice(" b", 0.04), Choice(" c", 0.02), Choice(" d", 0.2)]
+    assert shares(options(choices, "x."), SHORT) == [1, 1, 0, 1]
+    # Where the model has no favourite, everything it lists is fair game, down to a floor.
+    choices = [Choice(" a", 0.1), Choice(" b", 0.012), Choice(" c", 0.008)]
+    assert shares(options(choices, "x."), SHORT) == [1, 1, 0]
+    pieces = options([Choice("ly", 0.2), Choice("ship", 0.3), Choice(" and", 0.5)], "friend")
+    assert dict(zip((o.token for o in pieces), shares(pieces, SHORT))) == {" and": 1, "ly": 0, "ship": 1}
+
+
+def test_short_density_does_not_leave_a_word_half_written():
+    """Where the model wants to go on with the word, a comma may not cut the word off."""
+    unfinished = options([Choice("its", 0.6), Choice(",", 0.2), Choice(" made", 0.1), Choice("ight", 0.4)], "the stra")
+    assert dict(zip((o.token for o in unfinished), shares(unfinished, SHORT))) == {
+        " made": 0, ",": 0, "ight": 1, "its": 1,
+    }  # fmt: skip
+    assert dict(zip((o.token for o in unfinished), shares(unfinished, TIGHT)))[","] == 1
+    # A finished word may be followed by anything about as likely as extending it.
+    done = options([Choice("ship", 0.3), Choice(" and", 0.5), Choice(",", 0.1)], "friend")
+    assert dict(zip((o.token for o in done), shares(done, SHORT))) == {" and": 1, ",": 0, "ship": 1}
+    # The rule has no sharp edge: a token near it is one the reader reads both ways.
+    near = options([Choice("its", 0.6), Choice(",", 0.3 * (1 + WOBBLE))], "the stra")
+    assert shares(near, SHORT) == [1, 1] and _other_share(near[0], SHORT, 0.6, 0.6) == 0
+
+
+def test_short_density_keeps_the_shortest_of_a_few_drafts(keys):
+    class Counting(FakeBackend):
+        openings = 0
+
+        def start(self, messages, pieces=8):
+            Counting.openings += 1  # a new opening each time, as a real model gives
+            words = random.Random(Counting.openings).choices(VOCABULARY, k=pieces)
+            return " ".join(words).capitalize()
+
+    written: list[str] = []
+
+    def watch(progress):
+        if progress.embedded == progress.total:
+            written.append(progress.text)
+
+    backend = Counting(seed=40)
+    text = write_dense("top secret", keys, backend, ASK, watch, density="short")
+    assert Counting.openings == SHORT.drafts == 3
+    openings = {" ".join(draft.split()[:8]) for draft in written}
+    assert len(openings) == 3
+    assert len(text.split()) == min(len(draft.split()) for draft in written if draft.endswith("."))
+
+
+def test_a_probability_near_a_relative_level_is_read_both_ways(keys):
+    boundary = SHORT.levels[0][0] * 0.4  # the toy model's likeliest token has 0.4
+
+    class Shifted(FakeBackend):
+        shift = 0.0
+
+        def next_tokens(self, messages, prefix, attempt=0):
+            choices = super().next_tokens(messages, prefix, attempt)
+            if len(prefix.split()) != SHORT.opening_words + 2:
+                return choices
+            return [Choice(c.text, boundary + self.shift if c.probability == 0.06 else c.probability) for c in choices]
+
+    writer, reader = Shifted(seed=34), Shifted(seed=34)
+    writer.shift, reader.shift = boundary * WOBBLE / 3, -boundary * WOBBLE / 3
+    text = write_dense("hi", keys, writer, ASK, density="short")
+    assert read_dense(text, keys, reader) == "hi"
+    edge = [Choice(" a", 0.4), Choice(" b", boundary * (1 + WOBBLE)), Choice(" c", boundary * (1 - WOBBLE))]
+    assert [_other_share(option, SHORT, 0.4) for option in options(edge, "x.")] == [None, 0, 1]
+
+
+def test_wrong_password_recovers_nothing_from_a_short_text(keys, other_keys):
+    text = write_dense("top secret", keys, FakeBackend(seed=35), ASK, density="short")
+    with pytest.raises(DenseError):
+        read_dense(text, other_keys, FakeBackend(seed=35))
+
+
+def test_max_texts_from_before_the_leaner_sealing_still_read(keys):
+    backend = FakeBackend(seed=36)
+    opening = _opening(backend, ASK, MAX.opening_words)
+    old = _code("top secret", keys, backend, opening, None, random.Random(1), replace(MAX, lean=False))
+    assert read_dense(old, keys, backend) == "top secret"
+    new = _code("top secret", keys, backend, opening, None, random.Random(1), MAX)
+    assert read_dense(new, keys, backend) == "top secret"
+    assert len(new.split()) < len(old.split())

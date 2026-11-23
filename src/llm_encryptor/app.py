@@ -32,6 +32,7 @@ DEFAULT_TOPIC = "a friendly note to a friend about how the week has been"
 _DENSITIES = {
     "natural": "natural (reads best)",
     "tight": "tight (fewer words for longer secrets; reads less smoothly)",
+    "short": "short (under half the words of natural; still reads as prose)",
     "max": "max (shortest possible; the text is nonsense)",
 }
 _FORMATS = {

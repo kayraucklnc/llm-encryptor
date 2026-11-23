@@ -75,7 +75,8 @@ def _parser() -> argparse.ArgumentParser:
         "--density",
         choices=list(DENSITIES),
         default=unset,
-        help="compact format: tight is shorter and reads less smoothly; max is shortest and nonsense",
+        help="compact format: short takes under half the words of natural and still reads as prose; "
+        "tight reads less smoothly; max is shortest and nonsense",
     )
     shared.add_argument(
         "--temperature", type=float, default=unset, help="robust format: how freely the model writes"

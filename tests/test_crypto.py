@@ -1,6 +1,15 @@
+import time
+
 import pytest
 
-from llm_encryptor.crypto import NONCE_LEN, OVERHEAD, SecretBox, derive_keys
+from llm_encryptor.crypto import (
+    LEAN_TAG_BITS,
+    NONCE_LEN,
+    OVERHEAD,
+    LeanBox,
+    SecretBox,
+    derive_keys,
+)
 
 
 def test_same_password_gives_same_keys(keys):
@@ -53,3 +62,47 @@ def test_tampered_blob_does_not_open(keys, index):
 
 def test_too_short_blob_does_not_open(keys):
     assert SecretBox(keys.enc).open(b"x" * OVERHEAD) is None
+
+
+def test_lean_box_needs_no_random_bytes(keys, other_keys):
+    box = LeanBox(keys.dense)
+    sealed = box.seal("0110100", "Once upon a time")
+    assert len(sealed) == 7 + LEAN_TAG_BITS and set(sealed) <= {"0", "1"}
+    assert sealed[LEAN_TAG_BITS:] != "0110100"
+    assert list(box.open(sealed, "Once upon a time")) == ["0110100"]
+    # The same message under the same opening seals the same way; another opening does not.
+    assert box.seal("0110100", "Once upon a time") == sealed
+    assert box.seal("0110100", "Another opening")[:LEAN_TAG_BITS] != sealed[:LEAN_TAG_BITS]
+    assert list(box.open(sealed, "Another opening")) == []
+    assert list(LeanBox(other_keys.dense).open(sealed, "Once upon a time")) == []
+
+
+def test_lean_box_finds_the_message_before_whatever_follows_it(keys):
+    box = LeanBox(keys.dense)
+    sealed = box.seal("1" * 40, "x")
+    assert list(box.open(sealed + "0101101110", "x")) == ["1" * 40]
+    assert list(box.open(sealed[:-1], "x")) == []
+    assert list(box.open(sealed[:LEAN_TAG_BITS], "x")) == []
+    flipped = sealed[:5] + ("1" if sealed[5] == "0" else "0") + sealed[6:]
+    assert list(box.open(flipped, "x")) == []
+
+
+def test_lean_box_tells_messages_of_different_lengths_apart(keys):
+    box = LeanBox(keys.dense)
+    assert box.seal("0", "x")[:LEAN_TAG_BITS] != box.seal("00", "x")[:LEAN_TAG_BITS]
+    with pytest.raises(ValueError):
+        box.seal("", "x")
+
+
+@pytest.mark.parametrize("length", [1, 7, 8, 9, 16, 17, 63, 64, 200])
+def test_lean_box_opens_every_length(keys, length):
+    box = LeanBox(keys.dense)
+    message = ("10110" * 40)[:length]
+    assert list(box.open(box.seal(message, "x") + "110", "x")) == [message]
+
+
+def test_lean_box_stays_quick_on_a_long_text(keys):
+    box = LeanBox(keys.dense)
+    began = time.perf_counter()
+    assert list(box.open("01" * 4000, "x")) == []
+    assert time.perf_counter() - began < 0.5

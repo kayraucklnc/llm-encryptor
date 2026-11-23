@@ -77,6 +77,28 @@ def unpack(data: bytes) -> str:
             raise ValueError("Unknown packing.")
         return data[1:].decode("utf-8")
     bits = bin(int.from_bytes(data, "big"))[2:].zfill(8 * len(data))[1:]
+    return _decode(bits, filler_allowed=True)
+
+
+def pack_bits(text: str) -> str:
+    """Like ``pack``, but as a string of 0s and 1s with no padding to whole bytes."""
+    packed = _PACKED + "".join(_encode(char) for char in text)
+    raw = _RAW + "".join(f"{byte:08b}" for byte in text.encode("utf-8"))
+    return packed if len(packed) <= len(raw) else raw
+
+
+def unpack_bits(bits: str) -> str:
+    """Undo ``pack_bits``. Every bit must belong to a character, or it raises ValueError."""
+    if not bits:
+        raise ValueError("Nothing to unpack.")
+    if bits[0] == _PACKED:
+        return _decode(bits[1:], filler_allowed=False)
+    if len(bits) % 8 != 1:
+        raise ValueError("The packed message is cut off.")
+    return int(bits[1:], 2).to_bytes(len(bits) // 8, "big").decode("utf-8") if len(bits) > 1 else ""
+
+
+def _decode(bits: str, filler_allowed: bool) -> str:
     chars: list[str] = []
     at = 0
     while at < len(bits):
@@ -84,7 +106,9 @@ def unpack(data: bytes) -> str:
         while end <= len(bits) and bits[at:end] not in _SYMBOLS:
             end += 1
         if end > len(bits):
-            break  # Only filler is left.
+            if filler_allowed:
+                break  # Only filler is left.
+            raise ValueError("The packed message is cut off.")
         symbol = _SYMBOLS[bits[at:end]]
         at = end
         if symbol == _ESCAPE:

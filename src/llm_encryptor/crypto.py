@@ -9,11 +9,14 @@ of cover text.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 
 NONCE_LEN = 8
@@ -124,3 +127,89 @@ class DenseBox:
 def _dense_nonce(opening: str, salt: bytes) -> bytes:
     digest = hashlib.sha256(_DENSE_LABEL + opening.encode("utf-8")).digest()
     return digest[: _DENSE_NONCE_LEN - len(salt)] + salt
+
+
+LEAN_TAG_BITS = 32
+_LEAN_LABEL = b"llm-encryptor/lean/v1\x00"
+
+
+class LeanBox:
+    """Sealing with nothing but a tag added, for the shortest texts.
+
+    No random bytes travel with the message: the tag is a keyed hash of the
+    message and the opening words, and it doubles as the nonce (the idea of
+    SIV mode). The message is a string of bits, not bytes, so nothing is
+    padded either. The price of sending no random bytes: the same message
+    under the same password and opening seals the same way every time. Two
+    different messages share a nonce only if their openings match and their
+    32-bit tags collide.
+
+    The reader checks the tag at every possible length of every reading of a
+    text, a few hundred thousand checks at worst, so a text that holds no
+    message passes for one about once in 10,000 such texts.
+    """
+
+    def __init__(self, dense_key: bytes) -> None:
+        self._mac_key = hmac.new(dense_key, _LEAN_LABEL + b"mac", hashlib.sha256).digest()
+        self._enc_key = hmac.new(dense_key, _LEAN_LABEL + b"enc", hashlib.sha256).digest()
+
+    def seal(self, bits: str, opening: str) -> str:
+        """The tag followed by the encrypted bits, as a string of 0s and 1s."""
+        if not bits:
+            raise ValueError("There is nothing to seal.")
+        about = _about(opening)
+        message = int(bits, 2)
+        tag = next(tag for length, tag in self._tags(about, message, len(bits)) if length == len(bits))
+        return _as_bits(tag, LEAN_TAG_BITS) + _as_bits(message ^ self._stream(about, tag, len(bits)), len(bits))
+
+    def open(self, bits: str, opening: str) -> Iterator[str]:
+        """Every message that a leading part of ``bits`` holds.
+
+        The reader does not know where the message ends, so each length is
+        checked against the tag. Normally exactly one fits, or none.
+        """
+        count = len(bits) - LEAN_TAG_BITS
+        if count < 1:
+            return
+        about = _about(opening)
+        tag = int(bits[:LEAN_TAG_BITS], 2)
+        plain = int(bits[LEAN_TAG_BITS:], 2) ^ self._stream(about, tag, count)
+        for length, found in self._tags(about, plain, count):
+            if found == tag:
+                yield _as_bits(plain >> (count - length), length)
+
+    def _tags(self, about: bytes, message: int, count: int) -> Iterator[tuple[int, int]]:
+        """The tag of each leading part of a ``count``-bit message: (length, tag).
+
+        A tag covers the opening, the bits (the last byte filled up with
+        zeros) and their number. Hashing the bytes once and branching off at
+        every length keeps a long text from costing a hash of everything per
+        length.
+        """
+        data = (message << (-count % 8)).to_bytes((count + 7) // 8, "big")
+        whole = hmac.new(self._mac_key, about, hashlib.sha256)
+        for length in range(1, count + 1):
+            done, extra = divmod(length, 8)
+            branch = whole.copy()
+            if extra:
+                branch.update(bytes([data[done] & (0xFF << (8 - extra)) & 0xFF]))
+            else:
+                whole.update(data[done - 1 : done])
+                branch = whole.copy()
+            branch.update(length.to_bytes(4, "big"))
+            yield length, int.from_bytes(branch.digest()[:4], "big")
+
+    def _stream(self, about: bytes, tag: int, length: int) -> int:
+        """The first ``length`` bits of the keystream for this tag and opening."""
+        start = hashlib.sha256(_LEAN_LABEL + b"iv" + about + tag.to_bytes(4, "big")).digest()[:16]
+        size = (length + 7) // 8
+        stream = Cipher(algorithms.AES(self._enc_key), modes.CTR(start)).encryptor().update(bytes(size))
+        return int.from_bytes(stream, "big") >> (8 * size - length)
+
+
+def _about(opening: str) -> bytes:
+    return hashlib.sha256(_LEAN_LABEL + opening.encode("utf-8")).digest()
+
+
+def _as_bits(number: int, length: int) -> str:
+    return format(number, "b").zfill(length) if length else ""

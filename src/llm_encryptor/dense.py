@@ -32,9 +32,16 @@ from dataclasses import dataclass
 
 from .backend import Backend, Choice, Message
 from .codec import RevealError
-from .crypto import DENSE_SALT_LEN, DENSE_TAG_LEN, MAX_SECRET_BYTES, DenseBox, Keys
+from .crypto import (
+    DENSE_SALT_LEN,
+    DENSE_TAG_LEN,
+    MAX_SECRET_BYTES,
+    DenseBox,
+    Keys,
+    LeanBox,
+)
 from .embed import EmbedError, Progress, ProgressCallback
-from .textcode import pack, unpack
+from .textcode import pack, pack_bits, unpack, unpack_bits
 from .words import complete_word_ends, is_word_char, split_words
 
 
@@ -45,8 +52,12 @@ class Density:
 
     ``levels`` gives a token's share by its probability: (at least, shares).
     ``piece_level`` is how likely a token must be to continue a word (this
-    avoids misspellings). ``finish_sentence`` keeps writing to the end of the
-    sentence once the message is in.
+    avoids misspellings). With ``relative`` both are fractions of the likeliest
+    token's probability, ``floor`` is the least probability that counts at
+    all, and nothing may cut a word short that is less than ``piece_level``
+    times as likely as going on with it. ``finish_sentence`` keeps writing to the end of the sentence once the
+    message is in; ``quick_ending`` gets there by the likeliest words instead
+    of by chance.
     """
 
     levels: tuple[tuple[float, int], ...]
@@ -56,6 +67,15 @@ class Density:
     # opening words repeat more easily, so they come with more random bytes.
     opening_words: int = 16
     salt_len: int = DENSE_SALT_LEN
+    relative: bool = False
+    floor: float = 0.0
+    quick_ending: bool = False
+    # How many texts to write before keeping the shortest.
+    drafts: int = 1
+    # Sealed with a tag only (crypto.LeanBox): no random bytes, no padding.
+    # A density that also has a ``salt_len`` was sealed the older way before,
+    # and the reader still accepts that.
+    lean: bool = False
 
 
 # The reader tries each of these, so the writer is free to choose.
@@ -64,13 +84,33 @@ DENSITIES = {
     "natural": Density(((0.5, 16), (0.25, 8), (0.12, 4), (0.06, 2), (0.03, 1))),
     # Every plausible word is about equally likely: more bits per word.
     "tight": Density(((0.3, 2), (0.01, 1))),
+    # Every token within reach of the likeliest one counts the same. Where the
+    # model is sure, little else gets through; where it has no favourite (a
+    # name, a detail, a turn of phrase) everything it lists does. About twice
+    # the bits per word of natural, and it still reads as ordinary prose.
+    "short": Density(
+        ((0.05, 1),),
+        piece_level=0.5,
+        relative=True,
+        floor=0.01,
+        quick_ending=True,
+        drafts=3,
+        opening_words=8,
+        salt_len=0,
+        lean=True,
+    ),
     # Every token the model lists counts the same, however unlikely, and the
     # text stops the moment the message is in: shortest, and it reads as nonsense.
     "max": Density(
-        ((0.0005, 1),), piece_level=0.0, finish_sentence=False, opening_words=4, salt_len=4
+        ((0.0005, 1),),
+        piece_level=0.0,
+        finish_sentence=False,
+        opening_words=4,
+        salt_len=4,
+        lean=True,
     ),
 }
-NATURAL, TIGHT, MAX = DENSITIES["natural"], DENSITIES["tight"], DENSITIES["max"]
+NATURAL, TIGHT, SHORT, MAX = (DENSITIES[name] for name in ("natural", "tight", "short", "max"))
 NATURAL_OPENING = NATURAL.opening_words
 OPENING_PROMPT = (
     "You are a skilled writer. Write what the user asks for as natural, flowing prose "
@@ -164,13 +204,33 @@ class Option:
     extends_word: bool = False
 
 
-def _share(probability: float, extends_word: bool, density: Density) -> int:
-    if extends_word and probability < density.piece_level:
+def _share(
+    probability: float, extends_word: bool, density: Density, top: float = 1.0, word_top: float = 0.0
+) -> int:
+    """A token's share. ``top`` is the probability of the likeliest token on
+    offer and ``word_top`` that of the likeliest one continuing the word."""
+    scale = top if density.relative else 1.0
+    least = density.piece_level * (scale if extends_word else word_top)
+    if probability < max(density.floor, least):
         return 0
     for at_least, share in density.levels:
-        if probability >= at_least:
+        if probability >= at_least * scale:
             return share
     return 0
+
+
+def _top(found: Sequence[Option], density: Density) -> tuple[float, float]:
+    """The probabilities the shares are measured against: of the likeliest
+    token, and of the likeliest one that continues the word being written.
+
+    The second matters only with relative levels. Where the model wants to go
+    on with a word, a comma or a new word must be nearly as likely as that,
+    or the word would be left half-written.
+    """
+    top = max((option.probability for option in found), default=1.0)
+    if not density.relative:
+        return top, 0.0
+    return top, max((option.probability for option in found if option.extends_word), default=0.0)
 
 
 def options(choices: Sequence[Choice], written: str, first: bool = False) -> list[Option]:
@@ -222,7 +282,8 @@ def _without_repeats(found: Sequence[Option], written: str) -> list[Option]:
 
 def shares(found: Sequence[Option], density: Density = NATURAL) -> list[int]:
     """How the interval is shared among the options."""
-    result = [_share(o.probability, o.extends_word, density) for o in found]
+    top, word_top = _top(found, density)
+    result = [_share(o.probability, o.extends_word, density, top, word_top) for o in found]
     if found and not any(result):
         # Nothing stands out: let the likeliest token through.
         best = max(range(len(found)), key=lambda i: (found[i].probability, found[i].token))
@@ -230,12 +291,16 @@ def shares(found: Sequence[Option], density: Density = NATURAL) -> list[int]:
     return result
 
 
-def _other_share(option: Option, density: Density = NATURAL) -> int | None:
+def _other_share(
+    option: Option, density: Density = NATURAL, top: float = 1.0, word_top: float = 0.0
+) -> int | None:
     """The share this option would get just across a nearby level boundary."""
-    here = _share(option.probability, option.extends_word, density)
+    here = _share(option.probability, option.extends_word, density, top, word_top)
+    # Measured against another token, two probabilities wobble instead of one.
+    wobble = 2 * WOBBLE if density.relative else WOBBLE
     nearby = {
-        _share(option.probability * (1 - WOBBLE), option.extends_word, density),
-        _share(option.probability * (1 + WOBBLE), option.extends_word, density),
+        _share(option.probability * (1 - wobble), option.extends_word, density, top, word_top),
+        _share(option.probability * (1 + wobble), option.extends_word, density, top, word_top),
     }
     return next(iter(nearby - {here}), None)
 
@@ -259,16 +324,26 @@ def write_dense(
     # making progress, is thrown away and begun again with a new opening.
     problem = "The finished text did not decode back to the secret."
     for _ in range(_WRITE_TRIES):
-        opening = _opening(backend, asked, chosen.opening_words)
-        try:
-            text = _code(secret, keys, backend, opening, on_progress, rng, chosen)
-            if read_dense(text, keys, backend) == secret:
+        drafts = []
+        for _ in range(chosen.drafts):
+            opening = _opening(backend, asked, chosen.opening_words)
+            try:
+                drafts.append(_code(secret, keys, backend, opening, on_progress, rng, chosen))
+            except _Stuck as stuck:
+                problem = str(stuck)
+        # How long a text gets is partly luck (which words the bits happen to
+        # pick), so the shortest of a few drafts is a good deal shorter.
+        for text in sorted(drafts, key=lambda draft: len(draft.split())):
+            if _reads_back(text, secret, keys, backend):
                 return text
-        except DenseError:
-            continue
-        except _Stuck as stuck:
-            problem = str(stuck)
     raise EmbedError(f"{problem} Please try again, or pick a larger model.")
+
+
+def _reads_back(text: str, secret: str, keys: Keys, backend: Backend) -> bool:
+    try:
+        return read_dense(text, keys, backend) == secret
+    except DenseError:
+        return False
 
 
 class _Stuck(Exception):
@@ -285,12 +360,12 @@ def _code(
     density: Density,
 ) -> str:
     notify = on_progress or (lambda _progress: None)
-    payload = DenseBox(keys.dense).seal(pack(secret), text, density.salt_len)
-    wanted = 8 * len(payload)
+    payload = _sealed(secret, keys, text, density)
+    wanted = len(payload)
     # The point to home in on: the payload, then random digits so that the
     # words after the payload are still sampled the way the model would.
     digits = wanted + _PADDING_BITS
-    point = (int.from_bytes(payload, "big") << _PADDING_BITS) | rng.getrandbits(_PADDING_BITS)
+    point = (int(payload, 2) << _PADDING_BITS) | rng.getrandbits(_PADDING_BITS)
 
     interval = _Interval()
     done_at: int | None = None
@@ -298,21 +373,21 @@ def _code(
     backend.reset()
     for step in range(_TOKENS_PER_BIT * wanted + _TAIL_TOKENS):
         found = _lookup(backend, text, first=step == 0)
-        choices = [(o.token, share) for o, share in zip(found, shares(found, density)) if share]
+        choices = [(o, share) for o, share in zip(found, shares(found, density)) if share]
         if not choices:
             raise _Stuck("The model stopped before the whole message was in the text.")
         total = sum(count for _, count in choices)
-        # Which share of the interval holds the point?
-        offset = point * interval.scale - (interval.low << digits)
-        slot = offset * total // (interval.width << digits)
-        before = 0
-        token, count = choices[-1]
-        for token, count in choices:
-            if slot < before + count:
-                break
-            before += count
-        interval = interval.narrowed(before, count, total)
-        text += token
+        if done_at is not None and density.quick_ending:
+            # The message is in, so these words are free: head for the full stop.
+            at = _closing(choices)
+        else:
+            # Which share of the interval holds the point?
+            offset = point * interval.scale - (interval.low << digits)
+            slot = offset * total // (interval.width << digits)
+            at = _holding(slot, [count for _, count in choices])
+        option, count = choices[at]
+        interval = interval.narrowed(sum(c for _, c in choices[:at]), count, total)
+        text += option.token
         agreed = min(len(interval.agreed_bits(wanted)), wanted)
         notify(Progress(text, agreed, wanted))
         if agreed == wanted:
@@ -327,9 +402,35 @@ def _code(
     raise _Stuck("The model kept writing without leaving room for the message.")
 
 
+def _sealed(secret: str, keys: Keys, opening: str, density: Density) -> str:
+    """The encrypted secret as a string of 0s and 1s."""
+    if density.lean:
+        return LeanBox(keys.dense).seal(pack_bits(secret), opening)
+    payload = DenseBox(keys.dense).seal(pack(secret), opening, density.salt_len)
+    return "".join(f"{byte:08b}" for byte in payload)
+
+
+def _holding(slot: int, counts: Sequence[int]) -> int:
+    """Which share holds the given slot, counting the shares from the first."""
+    before = 0
+    for at, count in enumerate(counts):
+        if slot < before + count:
+            return at
+        before += count
+    return len(counts) - 1
+
+
+def _closing(choices: Sequence[tuple[Option, int]]) -> int:
+    """The token that ends the sentence if one is on offer, else the likeliest."""
+    for at, (option, _) in enumerate(choices):
+        if _SENTENCE_END.search(option.token.rstrip()):
+            return at
+    return max(range(len(choices)), key=lambda at: (choices[at][0].probability, choices[at][0].token))
+
+
 def read_dense(text: str, keys: Keys, backend: Backend) -> str:
     """Recover the secret from a compact-format text by replaying the model."""
-    box = DenseBox(keys.dense)
+    box, lean = DenseBox(keys.dense), LeanBox(keys.dense)
     too_short = True
     # Where the coded part starts depends on the density, so each opening
     # length gets its own pass over the text. The usual one goes first.
@@ -343,7 +444,15 @@ def read_dense(text: str, keys: Keys, backend: Backend) -> str:
             if density.opening_words != words:
                 continue
             for reading in _readings(steps, density):
-                secret = _open(box, _bits(steps, reading), opening, density.salt_len)
+                bits = _bits(steps, reading)
+                # The older sealing first: its texts were written before this
+                # reader existed, so nothing else guards them against the rare
+                # tag that fits by accident.
+                secret = None
+                if density.salt_len:
+                    secret = _open(box, _whole_bytes(bits), opening, density.salt_len)
+                if secret is None and density.lean:
+                    secret = _open_lean(lean, bits, opening)
                 if secret is not None:
                     return secret
     if too_short:
@@ -388,8 +497,9 @@ def _readings(steps: Sequence[tuple[list[Option], int]], density: Density):
     base = [shares(found, density) for found, _ in steps]
     doubts = []
     for at, (found, chosen) in enumerate(steps):
+        top, word_top = _top(found, density)
         for i, option in enumerate(found):
-            other = _other_share(option, density)
+            other = _other_share(option, density, top, word_top)
             if other is None:
                 continue
             if i == chosen and base[at][i] == 0:
@@ -408,17 +518,28 @@ def _readings(steps: Sequence[tuple[list[Option], int]], density: Density):
             yield reading
 
 
-def _bits(steps: Sequence[tuple[list[Option], int]], reading: Sequence[Sequence[int]]) -> bytes:
+def _bits(steps: Sequence[tuple[list[Option], int]], reading: Sequence[Sequence[int]]) -> str:
+    """The bits the text settles under this reading, as a string of 0s and 1s."""
     interval = _Interval()
     for (_, chosen), row in zip(steps, reading):
         if row[chosen] == 0:
             break
         interval = interval.narrowed(sum(row[:chosen]), row[chosen], sum(row))
-    bits = interval.agreed_bits(_MAX_BITS)
-    return bytes(
-        sum(bit << (7 - i) for i, bit in enumerate(bits[start : start + 8]))
-        for start in range(0, len(bits) - len(bits) % 8, 8)
-    )
+    return "".join(map(str, interval.agreed_bits(_MAX_BITS)))
+
+
+def _whole_bytes(bits: str) -> bytes:
+    whole = len(bits) - len(bits) % 8
+    return int(bits[:whole], 2).to_bytes(whole // 8, "big") if whole else b""
+
+
+def _open_lean(box: LeanBox, bits: str, opening: str) -> str | None:
+    for plaintext in box.open(bits, opening):
+        try:
+            return unpack_bits(plaintext)
+        except ValueError:
+            continue
+    return None
 
 
 def _open(box: DenseBox, blob: bytes, opening: str, salt_len: int) -> str | None:
