@@ -20,6 +20,7 @@ from collections.abc import Callable
 MAX_TEXT_CHARS = 20_000
 _LINE_LIMIT = 4 * MAX_TEXT_CHARS
 _MAX_NAME_CHARS = 40
+_MAX_MODEL_CHARS = 120
 
 
 class LineError(Exception):
@@ -71,9 +72,13 @@ class Line:
         name: str,
         on_text: Callable[[str], None],
         on_change: Callable[[], None] = lambda: None,
+        model: str = "",
     ) -> None:
         self.name = name[:_MAX_NAME_CHARS] or "someone"
+        self.model = model
         self.friend: str | None = None
+        # The model the friend writes and reads with; both sides need the same one.
+        self.friend_model: str | None = None
         self._on_text, self._on_change = on_text, on_change
         self._server: asyncio.Server | None = None
         self._writer: asyncio.StreamWriter | None = None
@@ -122,7 +127,7 @@ class Line:
 
     async def _adopt(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._writer = writer
-        await self._write({"type": "hello", "name": self.name})
+        await self._write({"type": "hello", "name": self.name, "model": self.model})
         self._listening = asyncio.create_task(self._listen(reader))
 
     async def _write(self, message: dict) -> None:
@@ -152,6 +157,8 @@ class Line:
             return
         if message.get("type") == "hello" and isinstance(message.get("name"), str):
             self.friend = message["name"].strip()[:_MAX_NAME_CHARS] or "friend"
+            model = message.get("model")
+            self.friend_model = model[:_MAX_MODEL_CHARS] if isinstance(model, str) and model else None
             self._on_change()
         elif (
             message.get("type") == "text"

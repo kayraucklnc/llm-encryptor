@@ -22,11 +22,12 @@ def test_what_is_not_an_id_is_refused(bad):
 def test_two_people_connect_and_text_both_ways():
     async def scene():
         got_a, got_b = [], []
-        ada, bo = Line("Ada", got_a.append), Line("Bo", got_b.append)
+        ada, bo = Line("Ada", got_a.append, model="qwen2.5:0.5b"), Line("Bo", got_b.append)
         port = parse_id(await ada.open(host="127.0.0.1"))[1]
         await bo.call(f"127.0.0.1:{port}")
         await asyncio.sleep(0.05)
         assert ada.connected and bo.connected and ada.friend == "Bo" and bo.friend == "Ada"
+        assert bo.friend_model == "qwen2.5:0.5b" and ada.friend_model is None
         await ada.send("Hey, dinner on Friday?")
         await bo.send("Sounds great!")
         await asyncio.sleep(0.05)

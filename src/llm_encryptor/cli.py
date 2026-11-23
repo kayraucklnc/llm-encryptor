@@ -113,7 +113,7 @@ def _app(args: argparse.Namespace, io: Io) -> None:
     model = _model(args, io)
     if io.fetch_model is not None:
         io.fetch_model(io, _host(args), model)
-    EncryptorApp(model, _host(args), io.make_backend).run()
+    EncryptorApp(model, _host(args), io.make_backend, list_models=io.list_models).run()
 
 
 def _menu(args: argparse.Namespace, io: Io) -> None:

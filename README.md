@@ -34,6 +34,16 @@ Type something into the topic field to steer the visible chat elsewhere. The
 slider trades length for naturalness: left is longer and reads best, right
 is shorter and, at the end, garbled.
 
+Everything is done from the keyboard: ↑ ↓ move through a menu or a form,
+← → turn the length slider, Enter goes, Escape goes back. The keys that work
+on a screen are listed at its foot. Reveal reads the text from your
+clipboard: copy it, open Reveal, type the password.
+
+**Model.** The Model line of the menu lists the models installed in Ollama,
+including ones you built yourself, and downloads another when you type its
+name. Both people need the same model; when you connect, each app tells the
+other which one it uses and the chat warns you if they differ.
+
 `llm-encryptor menu` opens the older plain menu, where the robust format
 (below) can also be chosen.
 

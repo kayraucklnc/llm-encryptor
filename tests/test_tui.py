@@ -13,6 +13,7 @@ from llm_encryptor.tui import (
     Chat,
     EncryptorApp,
     LengthDial,
+    Models,
     Steps,
     StepsPanel,
     Turn,
@@ -32,8 +33,8 @@ def no_clipboard(monkeypatch):
     monkeypatch.setattr(tui, "read_clipboard", lambda: "pasted text")
 
 
-def app():
-    return EncryptorApp("toy", "none", lambda model, host: FakeBackend(seed=1))
+def app(**more):
+    return EncryptorApp("toy", "none", lambda model, host: FakeBackend(seed=1), **more)
 
 
 async def fill(pilot, where, text):
@@ -106,67 +107,73 @@ def test_the_stages_show_a_message_being_hidden():
     assert idle.index("secret") < idle.index("locked") < idle.index("visible") and "· · ·" in idle
     midway = shown(Steps(secret="meet at noon", text="Hey, how", done_bits=30, all_bits=60, draft=2))
     assert "meet at noon" in midway and "30/60" in midway and "×2" in midway and "Hey, how▌" in midway
-    assert midway.count("▰") == midway.count("▱") > 0
+    assert "━" in midway
     done = shown(Steps(secret="s", text="Hey, how are you.", done_bits=60, all_bits=60, draft=1, finished=True))
-    assert "60/60" in done and "▱" not in done and "▌" not in done
+    assert "60/60" in done and "▌" not in done
 
 
 def test_the_stages_show_a_message_being_read_the_other_way_up():
     midway = shown(Steps(hiding=False, text="Hey, how are you.", read="Hey, how", bits="0110"))
     assert midway.index("visible") < midway.index("locked") < midway.index("secret")
-    assert "Hey, how are you." in midway and "▱▰▰▱  4" in midway and "· · ·" in midway
+    assert "Hey, how are you." in midway and "▯▮▮▯  4" in midway and "· · ·" in midway
     done = shown(Steps(hiding=False, text="Hey.", read="Hey.", bits="01", secret="noon", finished=True))
     assert "noon" in done and "· · ·" not in done
     assert "✗ wrong password" in shown(Steps(hiding=False, text="Hey.", problem="wrong password"))
 
 
-# --- the app ------------------------------------------------------------------
+# --- the app, worked with the keyboard only ------------------------------------
 
 
-def test_a_message_is_hidden_and_revealed_in_the_app(keys):
+def test_a_message_is_hidden_and_revealed_in_the_app(keys, monkeypatch):
     async def scene():
         running = app()
         async with running.run_test(size=(120, 44)) as pilot:
-            assert "Chat" in str(running.screen.query_one("#chat").label)
-            await pilot.click("#hide")
-            await pilot.click("#go")
+            await pilot.press("down", "enter")                      # Home: Chat, Hide, Reveal, Model
+            await pilot.press("enter")
             assert "secret and password needed" in status(running)
-            await fill(pilot, "#secret", "meet at noon")
-            await fill(pilot, "#password", "correct horse battery staple")
-            await fill(pilot, "#about", "the sea")
+            await pilot.press(*"meet at noon", "down", *"correct horse battery staple", "down", *"the sea")
             await pilot.press("enter")
             await until(pilot, lambda: "✓" in status(running))
             steps = running.screen.query_one(StepsPanel).steps
             assert steps.finished and steps.done_bits == steps.all_bits == 60
             assert read_dense(steps.text, keys, FakeBackend(seed=1)) == "meet at noon"
-            await pilot.press("escape")
-            await pilot.click("#reveal")
-            running.screen.query_one("#cover").text = steps.text
-            await fill(pilot, "#password", "correct horse battery staple")
-            await pilot.click("#go")
+
+            monkeypatch.setattr(tui, "read_clipboard", lambda: steps.text)
+            await pilot.press("escape", "down", "enter")            # back, then Reveal
+            assert running.screen.cover == steps.text
+            await pilot.press("enter")
+            assert "text and password needed" in status(running)
+            await pilot.press(*"correct horse battery staple", "enter")
             await until(pilot, lambda: "✓" in status(running))
             assert "✓ meet at noon" in status(running)
             assert running.screen.query_one(StepsPanel).steps.secret == "meet at noon"
             # A wrong password is said plainly.
-            await pilot.click("#password")
             await pilot.press("x", "enter")
             await until(pilot, lambda: "No hidden message found" in status(running))
 
     asyncio.run(scene())
 
 
-def test_the_dial_moves_with_the_arrow_keys():
+def test_arrow_keys_move_through_a_form_and_turn_the_dial():
     async def scene():
         running = app()
         async with running.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#hide")
+            await pilot.press("down", "enter")
+            focused = lambda: getattr(running.focused, "id", None)
+            assert focused() == "secret"
+            await pilot.press("down", "down")
+            assert focused() == "about"
+            await pilot.press("down")
             dial = running.screen.query_one(LengthDial)
-            dial.focus()
-            assert dial.density == "short"
+            assert running.focused is dial and dial.density == "short"
             await pilot.press("left", "left", "left", "left")
             assert dial.density == "natural"
             await pilot.press("right", "right", "right", "right", "right")
             assert dial.density == "max" and "garbled" in str(dial.render())
+            await pilot.press("up", "up", "up")
+            assert focused() == "secret"
+            await pilot.press("escape")
+            assert isinstance(running.focused, tui.Menu) and running.focused.at == 1
 
     asyncio.run(scene())
 
@@ -175,38 +182,31 @@ def test_two_people_chat_and_each_sees_both_conversations():
     async def scene():
         ada, bo = app(), app()
         async with ada.run_test(size=(120, 44)) as a, bo.run_test(size=(120, 44)) as b:
-            await a.click("#chat")
-            await b.click("#chat")
+            await a.press("enter")
+            await b.press("enter")
             await until(a, lambda: ada.screen.line._server is not None)
             port = ada.screen.line._server.sockets[0].getsockname()[1]
-            await a.click("#go")
+            await a.press("enter")
             assert "password needed" in status(ada)
-            await fill(a, "#name", "Ada")
-            await fill(a, "#password", "pw")
-            await a.click("#go")
+            await a.press(*"Ada", "down", *"pw", "enter")
             assert "waiting for your friend" in status(ada)
-            await fill(b, "#name", "Bo")
-            await fill(b, "#password", "pw")
-            await fill(b, "#friend", f"127.0.0.1:{port}")
-            await b.click("#go")
+            await b.press(*"Bo", "down", *"pw", "down", *f"127.0.0.1:{port}", "enter")
             await until(a, lambda: isinstance(ada.screen, Chat) and isinstance(bo.screen, Chat))
             await b.pause(0.1)
             assert "● Bo" in status(ada) and "● Ada" in status(bo)
             assert ada.screen.query_one("#about").placeholder == "dinner on Friday"
 
             turns = lambda running: list(running.screen.query(Turn))
-            await fill(a, "#secret", "meet at noon")
-            await fill(a, "#about", "the sea")
-            await a.press("enter")
+            await a.press(*"meet at noon", "down", *"the sea", "enter")
             await until(b, lambda: turns(bo) and turns(bo)[-1].secret == "meet at noon")
             await a.pause(0.1)
             sent, got = turns(ada)[0], turns(bo)[0]
             assert sent.who == "you" and got.who == "Ada" and sent.cover == got.cover != "…"
             assert "meet at noon" not in got.cover and bo.screen.last_from_friend == got.cover
             assert "replies to their last text" in bo.screen.query_one("#about").placeholder
+            assert ada.focused.id == "secret"                       # ready for the next message
 
-            await fill(b, "#secret", "ok, bring the keys")
-            await b.press("enter")
+            await b.press(*"ok, bring the keys", "enter")
             await until(a, lambda: len(turns(ada)) == 2 and turns(ada)[-1].secret == "ok, bring the keys")
             assert [turn.who for turn in turns(ada)] == ["you", "Bo"]
             panel = ada.screen.query_one(StepsPanel)
@@ -216,8 +216,7 @@ def test_two_people_chat_and_each_sees_both_conversations():
 
             await b.press("escape", "escape")
             await until(a, lambda: "Bo left" in status(ada))
-            await fill(a, "#secret", "hello?")
-            await a.press("enter")
+            await a.press(*"hello?", "enter")
             assert "not connected" in status(ada)
 
     asyncio.run(scene())
@@ -232,5 +231,64 @@ def test_a_text_hidden_with_another_password_shows_as_unreadable():
             chat.line.friend = "Bo"
             await running.push_screen(chat)
             await until(pilot, lambda: any("unreadable" in turn.secret for turn in chat.query(Turn)))
+
+    asyncio.run(scene())
+
+
+def test_a_model_is_picked_or_downloaded_in_the_app():
+    installed = ["toy", "other:1"]
+    used = []
+
+    def pull(name, host):
+        if name == "nope":
+            raise tui.BackendError("no such model")
+        yield "downloading: 50%"
+        installed.append(name)
+
+    def backend(model, host):
+        used.append(model)
+        return FakeBackend(seed=1)
+
+    async def scene():
+        running = EncryptorApp("toy", "none", backend, list_models=lambda host: list(installed), pull_model=pull)
+        async with running.run_test(size=(120, 44)) as pilot:
+            await pilot.press("up")                                 # round to Model, the last item
+            assert running.focused.items[-1] == ("model", "Model", "toy")
+            await pilot.press("enter")
+            options = running.screen.query_one("#installed")
+            await until(pilot, lambda: options.option_count == 2)
+            assert isinstance(running.screen, Models) and options.highlighted == 0
+            await pilot.press("tab", *"nope", "enter")
+            await until(pilot, lambda: "no such model" in status(running))
+            running.screen.query_one("#pull").value = ""
+            await pilot.press(*"fresh:2", "enter")
+            await until(pilot, lambda: options.option_count == 3 and "✓ fresh:2" in status(running))
+            assert running.model == "fresh:2" and options.highlighted == 2
+            await until(pilot, lambda: running.focused is options)
+            await pilot.press("up", "enter")                        # from fresh:2 to other:1
+            await until(pilot, lambda: not isinstance(running.screen, Models))
+            assert running.model == "other:1" and running.focused.items[-1][2] == "other:1"
+            # The model chosen is the one the next message is written with.
+            await pilot.press("down", "down", "enter", *"hi", "down", *"pw", "enter")
+            await until(pilot, lambda: "✓" in status(running))
+            assert used and set(used) == {"other:1"}
+
+    asyncio.run(scene())
+
+
+def test_chat_warns_when_the_two_use_different_models():
+    async def scene():
+        running = app()
+        async with running.run_test(size=(120, 44)) as pilot:
+            line = tui.Line("Me", print, model="toy")
+            line.friend, line.friend_model, line._writer = "Bo", "big:7", object()
+            chat = Chat(line, derive_keys("pw"), [])
+            await running.push_screen(chat)
+            await pilot.pause(0.1)
+            assert "≠ model: big:7" in status(running)
+            line.friend_model = "toy"
+            chat.line_changed()
+            assert "≠" not in status(running) and "● Bo" in status(running)
+            line._writer = None
 
     asyncio.run(scene())
