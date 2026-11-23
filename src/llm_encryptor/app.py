@@ -9,10 +9,11 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .backend import BackendError
-from .codec import RevealError, reveal_with_keys
+from .codec import RevealError
 from .crypto import Keys
 from .dense import read_dense
 from .embed import EmbedError
+from .names import reveal_offline
 from .session import Session
 from .terminal import (
     Io,
@@ -36,8 +37,9 @@ _DENSITIES = {
     "max": "max (shortest possible; the text is nonsense)",
 }
 _FORMATS = {
-    True: "compact (short text; the reader needs the same model)",
-    False: "robust (about three times longer; the reader needs no model)",
+    "compact": "compact (short text; the reader needs the same model)",
+    "robust": "robust (about three times longer; the reader needs no model)",
+    "names": "names (a short list of people; shortest, and the reader needs no model)",
 }
 
 
@@ -48,6 +50,11 @@ class Settings:
     compact: bool = True
     density: str = "natural"
     keys: Keys | None = None
+    names: bool = False
+
+    @property
+    def format(self) -> str:
+        return "names" if self.names else "compact" if self.compact else "robust"
 
 
 def run_app(io: Io, settings: Settings) -> None:
@@ -57,7 +64,7 @@ def run_app(io: Io, settings: Settings) -> None:
             "Encrypt a message",
             "Decrypt a message",
             f"Model: {settings.model}",
-            f"Format: {_FORMATS[settings.compact]}",
+            f"Format: {_FORMATS[settings.format]}",
             f"Density: {_DENSITIES[settings.density]}",
             "Change password",
             "Quit",
@@ -100,6 +107,7 @@ def _encrypt(io: Io, settings: Settings) -> Settings:
         io.make_backend(settings.model, settings.host),
         compact=settings.compact,
         density=settings.density,
+        names=settings.names,
     )
     request = io.ask("What should the text be about? (Enter for a friendly note) ").strip()
     request = request or DEFAULT_TOPIC
@@ -110,7 +118,8 @@ def _encrypt(io: Io, settings: Settings) -> Settings:
         io.console.print(Panel(Text(cover), title="text to send", border_style="green"))
         copied = "copied to your clipboard" if copy_text(cover) else "select it above to copy it"
         io.console.print(f"[green]✓[/green] {len(split_words(cover))} words · {copied}")
-        io.console.print(Text(reader_needs(session.backend, session.compact), style="dim"))
+        needs_model = session.compact and not session.names
+        io.console.print(Text(reader_needs(session.backend, needs_model), style="dim"))
         request = io.ask("Ask for a change (e.g. make it friendlier), or Enter when done: ").strip()
     return settings
 
@@ -126,7 +135,7 @@ def _decrypt(io: Io, settings: Settings) -> Settings:
     settings = _with_keys(io, settings, confirm=False)
     assert settings.keys is not None
     try:
-        secret = reveal_with_keys(text, settings.keys)  # The robust format needs no model.
+        secret = reveal_offline(text, settings.keys)  # Names and robust need no model.
     except RevealError:
         secret = _read_with_models(io, settings, text)
         if secret is None:
@@ -179,11 +188,13 @@ def _choose_model(io: Io, settings: Settings) -> Settings:
 
 
 def _switch_format(io: Io, settings: Settings) -> Settings:
-    return replace(settings, compact=not settings.compact)
+    formats = list(_FORMATS)
+    chosen = formats[(formats.index(settings.format) + 1) % len(formats)]
+    return replace(settings, compact=chosen != "robust", names=chosen == "names")
 
 
 def _switch_density(io: Io, settings: Settings) -> Settings:
-    if not settings.compact:
+    if settings.format != "compact":
         raise UserError("Density only applies to the compact format (item 4).")
     names = list(_DENSITIES)
     return replace(settings, density=names[(names.index(settings.density) + 1) % len(names)])

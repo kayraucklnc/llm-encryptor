@@ -314,3 +314,20 @@ def test_app_uses_the_arrow_menu_when_there_is_one(clipboard):
 def test_arrows_need_a_real_terminal(monkeypatch):
     monkeypatch.setattr(terminal.sys.stdin, "isatty", lambda: False, raising=False)
     assert terminal.can_use_arrows() is False
+
+
+def test_format_cycles_through_names_which_is_read_without_a_model(clipboard):
+    lines = ["4", "4", "1", "meet at noon", "about dinner", "", "2", "", "4", "q"]
+    code, shown, created = run(lines, hidden=[PASSWORD, PASSWORD])
+    assert code == 0
+    assert "Format: robust" in shown and "Format: names" in shown
+    assert shown.count("Format: compact") >= 2   # at the start, and after cycling round
+    assert "No model needed" in shown
+    assert "meet at noon" in shown.split("hidden message")[1]
+    assert created == ["fake:1"]   # only to write the line; reading needed no model
+    assert len(clipboard.text.split()) <= 12
+
+
+def test_density_does_not_apply_to_names(clipboard):
+    code, shown, _ = run(["4", "4", "5", "q"])
+    assert code == 0 and "only applies to the compact format" in shown

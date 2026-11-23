@@ -13,10 +13,11 @@ from rich.text import Text
 
 from .app import Settings, run_app
 from .backend import Backend, BackendError, Message
-from .codec import RevealError, reveal_with_keys
+from .codec import RevealError
 from .dense import DENSITIES, read_dense, write_dense
 from .embed import EmbedConfig, EmbedError
 from .hide import hide, validate_secret
+from .names import reveal_offline, write_names
 from .ollama import DEFAULT_HOST
 from .runtime import ensure_model, ensure_ready
 from .terminal import (
@@ -72,6 +73,12 @@ def _parser() -> argparse.ArgumentParser:
         help="write a longer text that can be read without a model",
     )
     shared.add_argument(
+        "--names",
+        action="store_true",
+        default=unset,
+        help="write a short list of people's names: shortest, and read without a model",
+    )
+    shared.add_argument(
         "--density",
         choices=list(DENSITIES),
         default=unset,
@@ -103,7 +110,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def _menu(args: argparse.Namespace, io: Io) -> None:
     _prepare(args, io)
-    settings = Settings(_host(args), _model(args, io), _compact(args), _density(args))
+    settings = Settings(
+        _host(args), _model(args, io), _compact(args), _density(args), names=_names(args)
+    )
     run_app(io, settings)
 
 
@@ -113,11 +122,13 @@ def _hide(args: argparse.Namespace, io: Io) -> None:
     keys = ask_keys(io, confirm=True)
     conversation: list[Message] = [{"role": "user", "content": args.about}]
     with progress(io) as on_progress:
-        if _compact(args):
+        if _names(args):
+            cover = write_names(secret, keys, backend, conversation, on_progress)
+        elif _compact(args):
             cover = write_dense(secret, keys, backend, conversation, on_progress, density=_density(args))
         else:
             cover = hide(secret, keys, backend, conversation, _config(args), on_progress)
-    io.errors.print(Text(reader_needs(backend, _compact(args)), style="dim"))
+    io.errors.print(Text(reader_needs(backend, _compact(args) and not _names(args)), style="dim"))
     if args.out:
         save_text(cover, str(args.out), io)
     else:
@@ -138,7 +149,7 @@ def _reveal(args: argparse.Namespace, io: Io) -> None:
         raise UserError("There is no text to read.")
     keys = ask_keys(io, confirm=False)
     try:
-        print(reveal_with_keys(text, keys))  # The robust format needs no model.
+        print(reveal_offline(text, keys))  # The names and robust formats need no model.
         return
     except RevealError:
         pass
@@ -174,6 +185,12 @@ def _density(args: argparse.Namespace) -> str:
 
 def _compact(args: argparse.Namespace) -> bool:
     return not getattr(args, "robust", False)
+
+
+def _names(args: argparse.Namespace) -> bool:
+    if getattr(args, "names", False) and getattr(args, "robust", False):
+        raise UserError("Choose one of --names and --robust.")
+    return getattr(args, "names", False)
 
 
 def _host(args: argparse.Namespace) -> str:

@@ -106,3 +106,24 @@ def test_lean_box_stays_quick_on_a_long_text(keys):
     began = time.perf_counter()
     assert list(box.open("01" * 4000, "x")) == []
     assert time.perf_counter() - began < 0.5
+
+
+@pytest.mark.parametrize("tag_bits", [16, 21, 25])
+def test_lean_box_with_a_shorter_tag(keys, other_keys, tag_bits):
+    box = LeanBox(keys.dense, tag_bits)
+    sealed = box.seal("0110100111", "names")
+    assert len(sealed) == 10 + tag_bits
+    assert box.open_whole(sealed, "names") == "0110100111"
+    assert list(box.open(sealed + "01", "names")) == ["0110100111"]
+    assert box.open_whole(sealed + "0", "names") is None
+    assert box.open_whole(sealed[:tag_bits], "names") is None
+    assert box.open_whole(sealed, "other") is None
+    assert LeanBox(other_keys.dense, tag_bits).open_whole(sealed, "names") is None
+    # A tag of another length is a different sealing, not a cut of the same one.
+    assert LeanBox(keys.dense).seal("0110100111", "names")[:tag_bits] != sealed[:tag_bits]
+
+
+def test_lean_box_refuses_a_tag_size_it_cannot_make(keys):
+    for tag_bits in (0, 33):
+        with pytest.raises(ValueError):
+            LeanBox(keys.dense, tag_bits)

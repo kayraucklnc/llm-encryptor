@@ -177,3 +177,20 @@ def test_models_are_listed():
     io, _, err, _ = make_io(models=())
     assert cli.main(["models"], io) == 1
     assert "ollama pull" in err.getvalue()
+
+
+def test_names_hide_then_reveal_without_a_model(capsys):
+    io, _, err, created = make_io(hidden=[PASSWORD, PASSWORD])
+    assert cli.main(["--names", "hide", "-s", "meet at noon", "-a", "dinner on Friday"], io) == 0
+    cover = capsys.readouterr().out.strip()
+    assert len(cover.split()) <= 12 and "No model needed" in err.getvalue()
+    reader, _, _, opened = make_io(hidden=[PASSWORD], stdin=cover)
+    assert cli.main(["reveal"], reader) == 0
+    assert capsys.readouterr().out.strip() == "meet at noon"
+    assert len(created) == 1 and opened == []
+
+
+def test_names_and_robust_cannot_be_combined():
+    io, _, err, _ = make_io(hidden=[PASSWORD, PASSWORD])
+    assert cli.main(["--names", "--robust", "hide", "-s", "x", "-a", "Write."], io) == 1
+    assert "one of --names and --robust" in err.getvalue()

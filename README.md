@@ -31,15 +31,32 @@ Move with the arrow keys and press Enter, or press an item's number.
 Decrypt reads the text from your clipboard (or a file, or pasted text). The
 password is asked once and kept until you close the app.
 
-## Two formats
+## Three formats
 
-| | Compact (default) | Robust (menu item 4, or `--robust`) |
-|---|---|---|
-| Text for a 12-character secret | about 100 words (about 40 at short density) | at least 337 words |
-| Time to write (4B model, laptop) | about 20 s | one to two minutes |
-| The reader needs | password + the same model | password only |
-| Each extra character costs | 3 to 4 words | 12 words |
-| Survives | changed spacing and line breaks | also changed case and punctuation marks |
+Menu item 4 switches between them; on the command line compact is the default
+and `--names` or `--robust` pick the others.
+
+| | Names | Compact (default) | Robust |
+|---|---|---|---|
+| Text for a 12-character secret | 12–16 words | about 100 words (about 40 at short density) | at least 337 words |
+| Time to write | about a second | about 20 s (4B model, laptop) | one to two minutes |
+| Time to read | at once | seconds: the model is replayed | at once |
+| The reader needs | password only | password + the same model | password only |
+| Each extra everyday word costs | 1.3 names | about 15 words | about 60 words |
+| What the text says | always "here are some people" | what you ask for | what you ask for |
+| Survives | anything that keeps the names and their order | changed spacing and line breaks | also changed case and punctuation marks |
+
+Names turns the secret into people's first names and lets the model finish
+the line that introduces them:
+
+```console
+$ llm-encryptor hide --names -a "dinner on Friday"
+Secret to hide: meet at noon
+Here's who is coming to dinner on Friday: Lisa, Vasilis, Noam, Magnus, Rupert and Sipho.
+```
+
+A list of names is the one kind of ordinary text in which every word may be
+anything, so each name carries 10 bits where a word of prose carries 1.5 to 3.
 
 Compact packs the bits into the model's own word choices, so it is as dense
 as the model's freedom allows, but the reader must replay the same model.
@@ -72,6 +89,7 @@ Run `llm-encryptor` for the menu. For scripts there are one-shot commands:
 | Command | What it does |
 |---|---|
 | `llm-encryptor hide -a "write about Turkey" -o msg.txt` | Hide a secret in one go |
+| `llm-encryptor hide --names -a "dinner on Friday"` | Hide it in a short list of names |
 | `llm-encryptor reveal msg.txt` | Recover the secret (or paste the text, then Ctrl-D) |
 | `llm-encryptor models` | List the models you can use |
 
@@ -145,6 +163,12 @@ naturally: a letter is 3–5 bits and a word of ordinary prose carries 1.5 to
 3. Max reaches 4.5 bits a word, which is the ceiling here, because Ollama
 reports only a model's 20 likeliest next tokens (4.3 bits).
 
+The names format gets below all of this by leaving prose behind. It packs
+the secret by the word (a listed everyday word costs 13 bits, so "meet at
+noon" is 40 bits instead of 49), adds a tag of 16 to 25 bits that fills the
+last name exactly, and spends 10 bits a name: 60 bits, six names. The
+39-character secret above takes 15 names, 24 words with its opening line.
+
 Coding the secret with the model itself, the way LLM compression does, was
 tried and does not help: with only 20 tokens visible, most content words of a
 secret are not among them and have to be spelled out at about 9 bits a
@@ -192,6 +216,22 @@ follows the same intervals and reads the bits off the final one.
   hashes again and compares. Max texts written before this (4 random bytes and
   a tag) are still read.
 
+**Names.** The secret is packed by the word: a fixed list of 4096 everyday
+words gives each listed word a 12-bit number, and anything else is spelled
+out in the letter code. The packed bits are sealed the same way as at short
+density (a keyed-hash tag that is also the nonce for AES-256 in counter mode),
+with a tag of 16 to 25 bits, as long as it takes to fill the last name. Every
+10 bits then pick one of 1024 first names from a fixed list.
+
+The model's part is small: the line starts with one of five fixed openings
+("Here's who is coming to", "The group for", …) and the model adds its
+likeliest words for the occasion you named, up to a colon. A line that runs
+on, or that contains a name of the list, is dropped for another opening.
+
+The reader looks up every word of the text in the name list, ignoring case,
+accents and punctuation, turns the names found back into bits and decrypts.
+No model is involved, so it takes a moment and works on any computer.
+
 **Robust.** The text is split into blocks of three words; HMAC-SHA256 of each
 block gives two bits. While the model writes, the app samples its next tokens
 as usual but keeps a block only if its bits are the next two bits of the
@@ -227,6 +267,21 @@ breaks, so "smart quotes" or autocorrect on the way will break it.
   Ollama version may compute slightly different probabilities; the reader
   tolerates small differences, but this is untested. If your friend cannot
   read a compact text, use `--robust`.
+- **A names text is recognisable as one to somebody who knows this tool.**
+  Its names all come from the tool's list (so do most common names), and
+  their number grows with the secret: 1.3 names for a listed word, about one
+  name for every two letters spelled out. What it says cannot be read without
+  the password.
+- **Names texts repeat, and their sealing is lighter.** The same secret
+  under the same password always gives the same names. The tag has 16 to 25
+  bits: a wrong password passes for a message at most about once in 30,000
+  tries. And among a few hundred different secrets sent under one password,
+  two are likely to share a keystream; someone holding both of those texts
+  could work out how the two secrets differ. Use compact when it must stand
+  up to someone who collects many of your texts.
+- **Do not add a name to a names text**, such as your own under it: every
+  listed name in the text is read as part of the message. Other edits are
+  harmless.
 - **Short and max texts repeat.** With no random bytes, the same secret under
   the same password and the same opening words hides as the same bits, so
   someone holding two such texts could tell they say the same thing. Openings
@@ -252,5 +307,16 @@ reports. To add another runtime, implement the `Backend` methods in
 $ uv sync
 $ uv run pytest --cov=llm_encryptor
 ```
+
+## Word lists
+
+`data/names.txt` (1024 first names) was written for this project.
+`data/secret_words.txt` (4096 everyday words) starts with about 550 words
+chosen for short messages, followed by the
+[BIP-39 English word list](https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt)
+and words from the EFF's
+[long word list](https://www.eff.org/dice) (CC BY 3.0 US). Both files are part
+of the format and must not change; `tools/build_lists.py` shows how they were
+put together.
 
 MIT licence.

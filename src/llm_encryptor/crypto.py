@@ -147,11 +147,19 @@ class LeanBox:
     The reader checks the tag at every possible length of every reading of a
     text, a few hundred thousand checks at worst, so a text that holds no
     message passes for one about once in 10,000 such texts.
+
+    ``tag_bits`` makes the tag shorter than 32 bits, for a format in which
+    the reader knows where the message ends and checks the tag only once.
     """
 
-    def __init__(self, dense_key: bytes) -> None:
-        self._mac_key = hmac.new(dense_key, _LEAN_LABEL + b"mac", hashlib.sha256).digest()
-        self._enc_key = hmac.new(dense_key, _LEAN_LABEL + b"enc", hashlib.sha256).digest()
+    def __init__(self, dense_key: bytes, tag_bits: int = LEAN_TAG_BITS) -> None:
+        if not 1 <= tag_bits <= LEAN_TAG_BITS:
+            raise ValueError(f"A tag has 1 to {LEAN_TAG_BITS} bits.")
+        self._tag_bits = tag_bits
+        # Its own keys per tag size: a shorter tag is never the start of a longer one.
+        label = _LEAN_LABEL if tag_bits == LEAN_TAG_BITS else _LEAN_LABEL + b"tag%d\x00" % tag_bits
+        self._mac_key = hmac.new(dense_key, label + b"mac", hashlib.sha256).digest()
+        self._enc_key = hmac.new(dense_key, label + b"enc", hashlib.sha256).digest()
 
     def seal(self, bits: str, opening: str) -> str:
         """The tag followed by the encrypted bits, as a string of 0s and 1s."""
@@ -159,8 +167,19 @@ class LeanBox:
             raise ValueError("There is nothing to seal.")
         about = _about(opening)
         message = int(bits, 2)
-        tag = next(tag for length, tag in self._tags(about, message, len(bits)) if length == len(bits))
-        return _as_bits(tag, LEAN_TAG_BITS) + _as_bits(message ^ self._stream(about, tag, len(bits)), len(bits))
+        tag = self._tag(about, message, len(bits))
+        sealed = message ^ self._stream(about, tag, len(bits))
+        return _as_bits(tag, self._tag_bits) + _as_bits(sealed, len(bits))
+
+    def open_whole(self, bits: str, opening: str) -> str | None:
+        """The message, when all of ``bits`` is one sealed message; else None."""
+        count = len(bits) - self._tag_bits
+        if count < 1:
+            return None
+        about = _about(opening)
+        tag = int(bits[: self._tag_bits], 2)
+        plain = int(bits[self._tag_bits :], 2) ^ self._stream(about, tag, count)
+        return _as_bits(plain, count) if self._tag(about, plain, count) == tag else None
 
     def open(self, bits: str, opening: str) -> Iterator[str]:
         """Every message that a leading part of ``bits`` holds.
@@ -168,15 +187,24 @@ class LeanBox:
         The reader does not know where the message ends, so each length is
         checked against the tag. Normally exactly one fits, or none.
         """
-        count = len(bits) - LEAN_TAG_BITS
+        count = len(bits) - self._tag_bits
         if count < 1:
             return
         about = _about(opening)
-        tag = int(bits[:LEAN_TAG_BITS], 2)
-        plain = int(bits[LEAN_TAG_BITS:], 2) ^ self._stream(about, tag, count)
+        tag = int(bits[: self._tag_bits], 2)
+        plain = int(bits[self._tag_bits :], 2) ^ self._stream(about, tag, count)
         for length, found in self._tags(about, plain, count):
             if found == tag:
                 yield _as_bits(plain >> (count - length), length)
+
+    def _tag(self, about: bytes, message: int, count: int) -> int:
+        """The tag of a ``count``-bit message."""
+        data = (message << (-count % 8)).to_bytes((count + 7) // 8, "big")
+        digest = hmac.digest(self._mac_key, about + data + count.to_bytes(4, "big"), hashlib.sha256)
+        return self._cut(digest)
+
+    def _cut(self, digest: bytes) -> int:
+        return int.from_bytes(digest[:4], "big") >> (LEAN_TAG_BITS - self._tag_bits)
 
     def _tags(self, about: bytes, message: int, count: int) -> Iterator[tuple[int, int]]:
         """The tag of each leading part of a ``count``-bit message: (length, tag).
@@ -197,7 +225,7 @@ class LeanBox:
                 whole.update(data[done - 1 : done])
                 branch = whole.copy()
             branch.update(length.to_bytes(4, "big"))
-            yield length, int.from_bytes(branch.digest()[:4], "big")
+            yield length, self._cut(branch.digest())
 
     def _stream(self, about: bytes, tag: int, length: int) -> int:
         """The first ``length`` bits of the keystream for this tag and opening."""
