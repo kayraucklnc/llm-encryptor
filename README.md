@@ -2,36 +2,40 @@
 
 Hide an encrypted message inside ordinary-looking text written by a local LLM.
 
-Run it, pick Encrypt, type your secret and what the text should be about. The
-text lands on your clipboard. Your friend picks Decrypt, and gets the secret
-back with the password.
+Run `llm-encryptor` and you get three things:
 
-```console
-$ llm-encryptor
-llm-encryptor  ↑↓ move · Enter choose · q back
-❯ 1  Encrypt a message
-  2  Decrypt a message
-  3  Model: qwen2.5:0.5b
-  4  Format: compact (short text; the reader needs the same model)
-  5  Density: short (a casual message of about 30 words)
-  6  Change password
-  7  Quit
-Secret to hide: meet at noon
-Password (the reader needs the same one):
-What should the text be about? (Enter for a friendly note) football tonight
-╭─ text to send ───────────────────────────────────────────────╮
-│ wanna come watch football tonight? maybe you'll see a friend │
-│ or two! bring a friend, we'll grab a pizza, make a new       │
-│ playlist!                                                    │
-╰──────────────────────────────────────────────────────────────╯
-✓ 23 words · copied to your clipboard
-To read it: the password and the model qwen2.5:0.5b.
-Ask for a change (e.g. make it friendlier), or Enter when done:
-```
+- **Chat** with a friend, directly from one computer to the other. What
+  travels is an ordinary-looking conversation; next to it each of you sees
+  the real one.
+- **Hide** a single message in a text.
+- **Reveal** a text you were sent.
 
-Move with the arrow keys and press Enter, or press an item's number.
-Decrypt reads the text from your clipboard (or a file, or pasted text). The
-password is asked once and kept until you close the app.
+Each screen shows the same three stages, filling in as the model works:
+your secret, the locked bits, and the visible text.
+
+## Chat
+
+Both of you open the app and choose Chat. One reads out the ID on the screen
+(ten letters and digits); the other types it. Both type the password you
+agreed on. There is no server: the ID is the first computer's address, so it
+works on the same network or over a VPN.
+
+The first message sets the topic of the visible chat ("dinner on Friday").
+After that every visible text is written as a reply to the one before, so
+whoever watches the line sees one conversation, while yours runs underneath:
+
+| Visible | Hidden |
+|---|---|
+| Hey! Where should we meet for coffee? Maybe on the rooftop at the cafe next door? We'll catch the last bus and the weather should be perfect. Have a great day! | meet at noon |
+| Hey! Just checking in on you! I'll be in town today for work. Don't worry! You got it. Keep safe, keep safe, and send me back the update when you get done! | ok, bring the keys |
+| Hey! Thanks for checking in! I'm still thinking about the trip. Do tell when it's a little bit shorter or I can tell you more details later! | which door? |
+
+Type something into the topic field to steer the visible chat elsewhere. The
+slider trades length for naturalness: left is longer and reads best, right
+is shorter and, at the end, garbled.
+
+`llm-encryptor menu` opens the older plain menu, where the robust format
+(below) can also be chosen.
 
 ## Two formats
 
