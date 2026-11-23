@@ -148,8 +148,8 @@ class LeanBox:
     text, a few hundred thousand checks at worst, so a text that holds no
     message passes for one about once in 10,000 such texts.
 
-    ``tag_bits`` makes the tag shorter than 32 bits, for a format in which
-    the reader knows where the message ends and checks the tag only once.
+    ``tag_bits`` makes the tag shorter than 32 bits, for a density whose
+    reader tries only a few readings of a text.
     """
 
     def __init__(self, dense_key: bytes, tag_bits: int = LEAN_TAG_BITS) -> None:
@@ -170,16 +170,6 @@ class LeanBox:
         tag = self._tag(about, message, len(bits))
         sealed = message ^ self._stream(about, tag, len(bits))
         return _as_bits(tag, self._tag_bits) + _as_bits(sealed, len(bits))
-
-    def open_whole(self, bits: str, opening: str) -> str | None:
-        """The message, when all of ``bits`` is one sealed message; else None."""
-        count = len(bits) - self._tag_bits
-        if count < 1:
-            return None
-        about = _about(opening)
-        tag = int(bits[: self._tag_bits], 2)
-        plain = int(bits[self._tag_bits :], 2) ^ self._stream(about, tag, count)
-        return _as_bits(plain, count) if self._tag(about, plain, count) == tag else None
 
     def open(self, bits: str, opening: str) -> Iterator[str]:
         """Every message that a leading part of ``bits`` holds.

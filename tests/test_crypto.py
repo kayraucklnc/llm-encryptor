@@ -108,19 +108,17 @@ def test_lean_box_stays_quick_on_a_long_text(keys):
     assert time.perf_counter() - began < 0.5
 
 
-@pytest.mark.parametrize("tag_bits", [16, 21, 25])
+@pytest.mark.parametrize("tag_bits", [16, 20, 25])
 def test_lean_box_with_a_shorter_tag(keys, other_keys, tag_bits):
     box = LeanBox(keys.dense, tag_bits)
-    sealed = box.seal("0110100111", "names")
+    sealed = box.seal("0110100111", "Once upon a time")
     assert len(sealed) == 10 + tag_bits
-    assert box.open_whole(sealed, "names") == "0110100111"
-    assert list(box.open(sealed + "01", "names")) == ["0110100111"]
-    assert box.open_whole(sealed + "0", "names") is None
-    assert box.open_whole(sealed[:tag_bits], "names") is None
-    assert box.open_whole(sealed, "other") is None
-    assert LeanBox(other_keys.dense, tag_bits).open_whole(sealed, "names") is None
+    assert list(box.open(sealed + "01", "Once upon a time")) == ["0110100111"]
+    assert list(box.open(sealed[:tag_bits], "Once upon a time")) == []
+    assert list(box.open(sealed, "Another opening")) == []
+    assert list(LeanBox(other_keys.dense, tag_bits).open(sealed, "Once upon a time")) == []
     # A tag of another length is a different sealing, not a cut of the same one.
-    assert LeanBox(keys.dense).seal("0110100111", "names")[:tag_bits] != sealed[:tag_bits]
+    assert LeanBox(keys.dense).seal("0110100111", "Once upon a time")[:tag_bits] != sealed[:tag_bits]
 
 
 def test_lean_box_refuses_a_tag_size_it_cannot_make(keys):

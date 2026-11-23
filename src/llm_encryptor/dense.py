@@ -25,9 +25,11 @@ them. So the reader needs no prompt.
 from __future__ import annotations
 
 import itertools
+import math
 import random
 import re
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from .backend import Backend, Choice, Message
@@ -35,6 +37,7 @@ from .codec import RevealError
 from .crypto import (
     DENSE_SALT_LEN,
     DENSE_TAG_LEN,
+    LEAN_TAG_BITS,
     MAX_SECRET_BYTES,
     DenseBox,
     Keys,
@@ -42,6 +45,7 @@ from .crypto import (
 )
 from .embed import EmbedError, Progress, ProgressCallback
 from .textcode import pack, pack_bits, unpack, unpack_bits
+from .wordcode import pack_words, unpack_words
 from .words import complete_word_ends, is_word_char, split_words
 
 
@@ -76,7 +80,39 @@ class Density:
     # A density that also has a ``salt_len`` was sealed the older way before,
     # and the reader still accepts that.
     lean: bool = False
+    tag_bits: int = LEAN_TAG_BITS
+    # How many readings of a text the reader may try; a shorter tag allows fewer.
+    readings: int | None = None
+    # The text must be the model's from its opening to its last word: nothing
+    # may follow it. This keeps a text of another density, which the model
+    # would not have written this way, from being taken for one of this.
+    whole_text: bool = False
+    # The secret is packed by the word (wordcode) instead of by the letter.
+    by_word: bool = False
+    # Only letters, digits and everyday punctuation may carry bits: no
+    # brackets, emojis or markup, and no capital in the middle of a word.
+    plain: bool = False
+    # What the model is told, when that is not the usual article-like prose.
+    opening_prompt: str | None = None
+    continuation: tuple[Message, ...] | None = None
 
+
+# People text each other every day, and a text may say almost anything: the
+# most ordinary cover there is for a few sentences that carry something.
+CHAT_OPENING = (
+    "Write a casual text message to a friend about what the user asks, two or three short "
+    "sentences, the way people really text. Plain text only: no emojis, no hashtags, no "
+    "preamble, no quotes, no placeholders. Start with the message itself."
+)
+CHAT_CONTINUE: tuple[Message, ...] = (
+    {
+        "role": "system",
+        "content": "You are texting a friend. Continue the message from where it stops, casually "
+        "and simply, in the same tone and language. Mention concrete little things: a time, a "
+        "place, what to bring. Plain text only, no emojis. Never comment on the text.",
+    },
+    {"role": "user", "content": "Write the text message."},
+)
 
 # The reader tries each of these, so the writer is free to choose.
 DENSITIES = {
@@ -84,20 +120,28 @@ DENSITIES = {
     "natural": Density(((0.5, 16), (0.25, 8), (0.12, 4), (0.06, 2), (0.03, 1))),
     # Every plausible word is about equally likely: more bits per word.
     "tight": Density(((0.3, 2), (0.01, 1))),
-    # Every token within reach of the likeliest one counts the same. Where the
-    # model is sure, little else gets through; where it has no favourite (a
-    # name, a detail, a turn of phrase) everything it lists does. About twice
-    # the bits per word of natural, and it still reads as ordinary prose.
+    # A casual message of a few sentences. Every token within reach of the
+    # likeliest one counts the same: where the model is sure, little else gets
+    # through; where it has no favourite (what to bring, when, where) all its
+    # ideas do. The secret is packed by the word and sealed with a short tag,
+    # and of several drafts the most ordinary one is kept.
     "short": Density(
-        ((0.05, 1),),
+        ((0.07, 1),),
         piece_level=0.5,
         relative=True,
-        floor=0.01,
+        floor=0.015,
         quick_ending=True,
-        drafts=3,
-        opening_words=8,
+        drafts=6,
+        opening_words=5,
         salt_len=0,
         lean=True,
+        tag_bits=20,
+        readings=32,
+        whole_text=True,
+        by_word=True,
+        plain=True,
+        opening_prompt=CHAT_OPENING,
+        continuation=CHAT_CONTINUE,
     ),
     # Every token the model lists counts the same, however unlikely, and the
     # text stops the moment the message is in: shortest, and it reads as nonsense.
@@ -111,6 +155,8 @@ DENSITIES = {
     ),
 }
 NATURAL, TIGHT, SHORT, MAX = (DENSITIES[name] for name in ("natural", "tight", "short", "max"))
+# What the app and the command line use unless told otherwise.
+DEFAULT_DENSITY = "short"
 NATURAL_OPENING = NATURAL.opening_words
 OPENING_PROMPT = (
     "You are a skilled writer. Write what the user asks for as natural, flowing prose "
@@ -149,6 +195,28 @@ _TAIL_TOKENS = 60
 # A healthy text hides a bit every token or two; give up on one that hides none for this long.
 _STALL_TOKENS = 40
 _MAX_READINGS = 1000
+# After this long, a slow model writes no further drafts.
+_DRAFT_SECONDS = 15.0
+# A text of at most this many words is first read as a short-density text.
+_BRIEF_WORDS = 80
+_SUBJECT_LETTERS = 3
+# Words of a request that are about the writing, or about nothing much.
+_NOT_A_SUBJECT = frozenset(
+    [
+        "about", "all", "also", "and", "any", "are", "been", "but", "can", "casual",
+        "could", "for", "friend", "friendly", "friends", "from", "get", "good", "got",
+        "had", "has", "have", "her", "here", "his", "how", "into", "its", "just", "let",
+        "like", "little", "make", "many", "message", "more", "most", "much", "new", "nice",
+        "not", "note", "one", "our", "out", "over", "please", "really", "say", "see",
+        "short", "should", "some", "such", "tell", "text", "than", "that", "the", "their",
+        "them", "then", "there", "they", "thing", "things", "this", "two", "very", "want",
+        "was", "were", "what", "when", "who", "why", "will", "with", "would", "write",
+        "yes", "you", "your",
+    ]
+)
+_SENTENCE_STOP = re.compile(r"[.!?]")
+_SENTENCE_WORDS = 3
+_PLAIN = re.compile(r"(?:[^\W_]|[\s.,!?'’:;-])*")
 _MAX_DOUBTS_FLIPPED = 4
 _SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*$")
 _SPACE = re.compile(r"\s+")
@@ -233,14 +301,33 @@ def _top(found: Sequence[Option], density: Density) -> tuple[float, float]:
     return top, max((option.probability for option in found if option.extends_word), default=0.0)
 
 
-def options(choices: Sequence[Choice], written: str, first: bool = False) -> list[Option]:
+def _is_plain(token: str, written: str) -> bool:
+    """Letters, digits and everyday punctuation only, used the everyday way."""
+    mid_word = is_word_char(written[-1:])
+    odd_piece = mid_word and is_word_char(token[0]) and any(char.isupper() for char in token)
+    # An apostrophe at the end of a token starts a quotation or leaves a word hanging ("don' t").
+    hanging = token.rstrip()[-1:] in ("'", "’")
+    # A run of one- and two-word sentences ("You? Have fun. Where to?") reads as noise.
+    sentence = _SENTENCE_STOP.split(written)[-1]
+    clipped = token.lstrip()[:1] in (".", "!", "?") and len(split_words(sentence)) < _SENTENCE_WORDS
+    return not (odd_piece or hanging or clipped) and _PLAIN.fullmatch(token) is not None
+
+
+def _continuation(density: Density) -> tuple[Message, ...]:
+    return density.continuation or CONTINUE
+
+
+def options(
+    choices: Sequence[Choice], written: str, first: bool = False, plain: bool = False
+) -> list[Option]:
     """Which tokens may come next, in a fixed order.
 
     Deterministic, because sender and reader must get the same answer. No
     token may read as the start of another once spacing is flattened;
     otherwise the reader could not tell which one was written. The first coded
     token may not extend the last opening word, or the reader would cut the
-    opening in a different place.
+    opening in a different place. With ``plain``, tokens with brackets, emojis
+    or markup in them are left out, as is a capital in the middle of a word.
     """
     seen = flatten(written)
     mid_word = is_word_char(written[-1:])
@@ -249,6 +336,7 @@ def options(choices: Sequence[Choice], written: str, first: bool = False) -> lis
         for choice in choices
         if choice.probability > 0 and choice.text.strip() and "\ufffd" not in choice.text
         and not (first and is_word_char(choice.text[0]))
+        and not (plain and not _is_plain(choice.text, written))
     )
     kept: list[Option] = []
     keys: list[str] = []
@@ -313,30 +401,63 @@ def write_dense(
     on_progress: ProgressCallback | None = None,
     rng: random.Random | None = None,
     density: str = "natural",
+    clock: Callable[[], float] = time.monotonic,
 ) -> str:
     """A text that opens as ``conversation`` asks and carries ``secret``."""
     rng = rng or random.SystemRandom()
     chosen = DENSITIES[density]
-    asked = [{"role": "system", "content": OPENING_PROMPT}, *conversation]
+    asked: list[Message] = [
+        {"role": "system", "content": chosen.opening_prompt or OPENING_PROMPT},
+        *conversation,
+    ]
     # What a model server has cached changes its numbers slightly. Writer and
     # reader therefore both start from a freshly loaded model, and every text
     # is read back before it is returned. A text that fails, or that stops
     # making progress, is thrown away and begun again with a new opening.
     problem = "The finished text did not decode back to the secret."
+    # With only a few free words at the start, they had better say what the text is about.
+    subject = _subject(conversation) if chosen.plain else frozenset()
+    # Sealed without random bytes, the same opening would give the same text
+    # again: a text asked for after an earlier one must start differently.
+    earlier = [flatten(m["content"]) for m in conversation if m["role"] == "assistant"]
+    earlier = earlier if chosen.plain else []
     for _ in range(_WRITE_TRIES):
-        drafts = []
+        drafts: list[tuple[float, str]] = []
+        started = clock()
         for _ in range(chosen.drafts):
-            opening = _opening(backend, asked, chosen.opening_words)
+            if drafts and clock() - started > _DRAFT_SECONDS:
+                break  # A slow model gets fewer drafts rather than a long wait.
+            opening = _opening(
+                backend, asked, chosen.opening_words, chosen.plain, subject, earlier
+            )
             try:
-                drafts.append(_code(secret, keys, backend, opening, on_progress, rng, chosen))
+                drafts.append(_draft(secret, keys, backend, opening, on_progress, rng, chosen))
             except _Stuck as stuck:
                 problem = str(stuck)
-        # How long a text gets is partly luck (which words the bits happen to
-        # pick), so the shortest of a few drafts is a good deal shorter.
-        for text in sorted(drafts, key=lambda draft: len(draft.split())):
+        # Which words the bits happen to pick is luck. Of several drafts the
+        # one the model finds likeliest is kept: few words, and ordinary ones.
+        for _, text in sorted(drafts):
             if _reads_back(text, secret, keys, backend):
                 return text
     raise EmbedError(f"{problem} Please try again, or pick a larger model.")
+
+
+def _subject(conversation: Sequence[Message]) -> frozenset[str]:
+    """The words of the user's requests that say what the text should be about."""
+    said = " ".join(message["content"] for message in conversation if message["role"] == "user")
+    return frozenset(
+        word for word in split_words(said) if len(word) >= _SUBJECT_LETTERS and word not in _NOT_A_SUBJECT
+    )
+
+
+def _mentions(opening: str, subject: frozenset[str]) -> bool:
+    """Does the opening use a word of the subject, or a longer or shorter form of one?"""
+    return any(
+        word.startswith(key) or key.startswith(word)
+        for word in split_words(opening)
+        if len(word) >= _SUBJECT_LETTERS
+        for key in subject
+    )
 
 
 def _reads_back(text: str, secret: str, keys: Keys, backend: Backend) -> bool:
@@ -359,7 +480,22 @@ def _code(
     rng: random.Random,
     density: Density,
 ) -> str:
+    """The opening ``text`` continued so that it carries ``secret``."""
+    return _draft(secret, keys, backend, text, on_progress, rng, density)[1]
+
+
+def _draft(
+    secret: str,
+    keys: Keys,
+    backend: Backend,
+    text: str,
+    on_progress: ProgressCallback | None,
+    rng: random.Random,
+    density: Density,
+) -> tuple[float, str]:
+    """A text that carries ``secret``, and how surprising the model finds it (in bits)."""
     notify = on_progress or (lambda _progress: None)
+    surprise = 0.0
     payload = _sealed(secret, keys, text, density)
     wanted = len(payload)
     # The point to home in on: the payload, then random digits so that the
@@ -372,7 +508,7 @@ def _code(
     gained_at, most = 0, 0
     backend.reset()
     for step in range(_TOKENS_PER_BIT * wanted + _TAIL_TOKENS):
-        found = _lookup(backend, text, first=step == 0)
+        found = _lookup(backend, text, step == 0, _continuation(density), density.plain)
         choices = [(o, share) for o, share in zip(found, shares(found, density)) if share]
         if not choices:
             raise _Stuck("The model stopped before the whole message was in the text.")
@@ -388,13 +524,14 @@ def _code(
         option, count = choices[at]
         interval = interval.narrowed(sum(c for _, c in choices[:at]), count, total)
         text += option.token
+        surprise -= math.log2(option.probability)
         agreed = min(len(interval.agreed_bits(wanted)), wanted)
         notify(Progress(text, agreed, wanted))
         if agreed == wanted:
             done_at = step if done_at is None else done_at
             ended = not density.finish_sentence or _SENTENCE_END.search(text.rstrip())
             if ended or step - done_at >= _TAIL_TOKENS:
-                return text.rstrip()
+                return surprise, text.rstrip()
         elif agreed > most:
             gained_at, most = step, agreed
         elif step - gained_at >= _STALL_TOKENS:
@@ -405,7 +542,8 @@ def _code(
 def _sealed(secret: str, keys: Keys, opening: str, density: Density) -> str:
     """The encrypted secret as a string of 0s and 1s."""
     if density.lean:
-        return LeanBox(keys.dense).seal(pack_bits(secret), opening)
+        packed = pack_words(secret) if density.by_word else pack_bits(secret)
+        return LeanBox(keys.dense, density.tag_bits).seal(packed, opening)
     payload = DenseBox(keys.dense).seal(pack(secret), opening, density.salt_len)
     return "".join(f"{byte:08b}" for byte in payload)
 
@@ -430,19 +568,20 @@ def _closing(choices: Sequence[tuple[Option, int]]) -> int:
 
 def read_dense(text: str, keys: Keys, backend: Backend) -> str:
     """Recover the secret from a compact-format text by replaying the model."""
-    box, lean = DenseBox(keys.dense), LeanBox(keys.dense)
+    box = DenseBox(keys.dense)
     too_short = True
-    # Where the coded part starts depends on the density, so each opening
-    # length gets its own pass over the text. The usual one goes first.
-    for words in sorted({density.opening_words for density in DENSITIES.values()}, reverse=True):
+    # Where the coded part starts, and what the model was told, depend on the
+    # density, so each such pair gets its own pass over the text.
+    for one in _passes(text):
         try:
-            opening, steps = _replay(text, backend, words)
+            opening, steps, to_the_end = _replay(text, backend, *one)
         except DenseError:
             continue
         too_short = False
         for density in DENSITIES.values():
-            if density.opening_words != words:
+            if _pass_of(density) != one or (density.whole_text and not to_the_end):
                 continue
+            lean = LeanBox(keys.dense, density.tag_bits)
             for reading in _readings(steps, density):
                 bits = _bits(steps, reading)
                 # The older sealing first: its texts were written before this
@@ -452,7 +591,7 @@ def read_dense(text: str, keys: Keys, backend: Backend) -> str:
                 if density.salt_len:
                     secret = _open(box, _whole_bytes(bits), opening, density.salt_len)
                 if secret is None and density.lean:
-                    secret = _open_lean(lean, bits, opening)
+                    secret = _open_lean(lean, bits, opening, density.by_word)
                 if secret is not None:
                     return secret
     if too_short:
@@ -463,14 +602,48 @@ def read_dense(text: str, keys: Keys, backend: Backend) -> str:
     )
 
 
-def _replay(text: str, backend: Backend, words: int) -> tuple[str, list[tuple[list[Option], int]]]:
-    """Follow the text token by token: what the model offered, and what was written."""
+_Pass = tuple[int, tuple[Message, ...], bool]
+
+
+def _pass_of(density: Density) -> _Pass:
+    """What a pass over a text depends on: opening words, what the model was told, plain or not."""
+    return density.opening_words, _continuation(density), density.plain
+
+
+def _passes(text: str) -> list[_Pass]:
+    """The passes to make over a text.
+
+    Longest opening first, except that a brief text is most likely a short
+    one and is read as that first. Every pass is still made if needed.
+    """
+    passes: list[_Pass] = []
+    for density in DENSITIES.values():
+        if _pass_of(density) not in passes:
+            passes.append(_pass_of(density))
+    passes.sort(key=lambda one: -one[0])
+    if len(text.split()) <= _BRIEF_WORDS:
+        passes.sort(key=lambda one: one != _pass_of(SHORT))
+    return passes
+
+
+def _replay(
+    text: str,
+    backend: Backend,
+    words: int,
+    continuation: tuple[Message, ...] = CONTINUE,
+    plain: bool = False,
+) -> tuple[str, list[tuple[list[Option], int]], bool]:
+    """Follow the text token by token: what the model offered, and what was written.
+
+    Also says whether that got to the end of the text, or stopped at a place
+    where the model could not have written what stands there.
+    """
     written, rest = split_opening(text, words)
     opening = written
     steps: list[tuple[list[Option], int]] = []
     backend.reset()
     while rest.strip():
-        found = _lookup(backend, written, first=written == opening)
+        found = _lookup(backend, written, written == opening, continuation, plain)
         index = next(
             (
                 i
@@ -485,7 +658,7 @@ def _replay(text: str, backend: Backend, words: int) -> tuple[str, list[tuple[li
         steps.append((found, index))
         rest = rest[len(flatten(written + token)) - len(flatten(written)) :]
         written += token
-    return opening, steps
+    return opening, steps, not rest.strip()
 
 
 def _readings(steps: Sequence[tuple[list[Option], int]], density: Density):
@@ -509,7 +682,7 @@ def _readings(steps: Sequence[tuple[list[Option], int]], density: Density):
     tried = 0
     for size in range(min(_MAX_DOUBTS_FLIPPED, len(doubts)) + 1):
         for flipped in itertools.combinations(doubts, size):
-            if tried >= _MAX_READINGS:
+            if tried >= (density.readings or _MAX_READINGS):
                 return
             tried += 1
             reading = [list(row) for row in base]
@@ -533,10 +706,11 @@ def _whole_bytes(bits: str) -> bytes:
     return int(bits[:whole], 2).to_bytes(whole // 8, "big") if whole else b""
 
 
-def _open_lean(box: LeanBox, bits: str, opening: str) -> str | None:
+def _open_lean(box: LeanBox, bits: str, opening: str, by_word: bool = False) -> str | None:
+    unpacked = unpack_words if by_word else unpack_bits
     for plaintext in box.open(bits, opening):
         try:
-            return unpack_bits(plaintext)
+            return unpacked(plaintext)
         except ValueError:
             continue
     return None
@@ -559,25 +733,55 @@ def _continues(new_flat: str, old_flat: str, rest: str) -> bool:
     return rest.startswith(added) or rest == added.rstrip()
 
 
-def _lookup(backend: Backend, written: str, first: bool = False) -> list[Option]:
+def _lookup(
+    backend: Backend,
+    written: str,
+    first: bool = False,
+    continuation: tuple[Message, ...] = CONTINUE,
+    plain: bool = False,
+) -> list[Option]:
     # When the model would rather stop, ask again (the same way on both sides)
     # until it shows what else it could write.
     for attempt in range(_LOOKUP_TRIES):
-        found = options(backend.next_tokens(CONTINUE, written, attempt), written, first)
+        found = options(backend.next_tokens(continuation, written, attempt), written, first, plain)
         if found:
             return found
     return []
 
 
-def _opening(backend: Backend, messages: Sequence[Message], words: int) -> str:
+def _opening(
+    backend: Backend,
+    messages: Sequence[Message],
+    words: int,
+    plain: bool = False,
+    subject: frozenset[str] = frozenset(),
+    earlier: Sequence[str] = (),
+) -> str:
+    """The first ``words`` words of a reply to ``messages``.
+
+    With ``plain``, a start with a placeholder or an emoji in it is asked for
+    again; so is one that starts an ``earlier`` text, and with a ``subject``
+    one that mentions none of its words. The best start seen is used when the
+    model never gives a better one.
+    """
     asked = list(messages)
+    spare: tuple[tuple[bool, bool, bool], str] | None = None
     for _ in range(_OPENING_TRIES):
         sample = flatten(backend.start(asked, _OPENING_PIECES)).strip()
         ends = complete_word_ends(sample)
         if len(ends) >= words:
-            return sample[: ends[words - 1]]
-        if sample:
+            opening = sample[: ends[words - 1]]
+            is_plain = not plain or _PLAIN.fullmatch(opening) is not None
+            is_new = not any(text.startswith(opening) for text in earlier)
+            on_subject = not subject or _mentions(opening, subject)
+            if is_plain and is_new and on_subject:
+                return opening
+            if spare is None or (is_plain, is_new, on_subject) > spare[0]:
+                spare = ((is_plain, is_new, on_subject), opening)
+        elif sample:
             asked = [*messages, {"role": "assistant", "content": sample}, _INSIST]
+    if spare is not None:
+        return spare[1]
     raise EmbedError(
         "The model only gave a very short reply, too short to start a text. "
         "Say more about what to write (for example: write about a trip to Turkey), "
