@@ -39,6 +39,8 @@ __all__ = ["HOST_ENV", "MODEL_ENV", "PASSWORD_ENV", "Io", "main"]
 
 
 def main(argv: Sequence[str] | None = None, io: Io | None = None) -> int:
+    # Run by a person at a terminal, with no command: the full-screen app.
+    in_person = io is None and sys.stdin.isatty() and sys.stdout.isatty()
     io = io or Io(
         prepare=ensure_ready,
         fetch_model=ensure_model,
@@ -46,7 +48,8 @@ def main(argv: Sequence[str] | None = None, io: Io | None = None) -> int:
     )
     args = _parser().parse_args(argv)
     try:
-        command = {"hide": _hide, "reveal": _reveal, "models": _models}.get(args.command, _menu)
+        commands = {"hide": _hide, "reveal": _reveal, "models": _models, "menu": _menu}
+        command = commands.get(args.command, _app if in_person else _menu)
         command(args, io)
     except (UserError, BackendError, EmbedError, RevealError, ValueError) as error:
         io.errors.print(Text(str(error), style="red"))
@@ -98,7 +101,19 @@ def _parser() -> argparse.ArgumentParser:
     reveal_parser = commands.add_parser("reveal", parents=[shared], help="recover the secret from a text")
     reveal_parser.add_argument("file", nargs="?", type=Path, help="file with the text (default: paste it)")
     commands.add_parser("models", parents=[shared], help="list the models you can use")
+    commands.add_parser("menu", parents=[shared], help="the plain menu instead of the full-screen app")
     return parser
+
+
+def _app(args: argparse.Namespace, io: Io) -> None:
+    """The full-screen app: chat with a friend, hide a message, reveal one."""
+    from .tui import EncryptorApp  # Only needed here, and slow to import.
+
+    _prepare(args, io)
+    model = _model(args, io)
+    if io.fetch_model is not None:
+        io.fetch_model(io, _host(args), model)
+    EncryptorApp(model, _host(args), io.make_backend, list_models=io.list_models).run()
 
 
 def _menu(args: argparse.Namespace, io: Io) -> None:

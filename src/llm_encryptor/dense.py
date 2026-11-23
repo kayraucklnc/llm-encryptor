@@ -108,8 +108,8 @@ CHAT_CONTINUE: tuple[Message, ...] = (
     {
         "role": "system",
         "content": "You are texting a friend. Continue the message from where it stops, casually "
-        "and simply, in the same tone and language. Mention concrete little things: a time, a "
-        "place, what to bring. Plain text only, no emojis. Never comment on the text.",
+        "and simply, in the same tone and language, with the everyday details real plans have. "
+        "Plain text only, no emojis. Never comment on the text or on these instructions.",
     },
     {"role": "user", "content": "Write the text message."},
 )
@@ -203,7 +203,7 @@ _SUBJECT_LETTERS = 3
 # Words of a request that are about the writing, or about nothing much.
 _NOT_A_SUBJECT = frozenset(
     [
-        "about", "all", "also", "and", "any", "are", "been", "but", "can", "casual",
+        "about", "all", "texted", "reply", "back", "bring", "round", "also", "and", "any", "are", "been", "but", "can", "casual",
         "could", "for", "friend", "friendly", "friends", "from", "get", "good", "got",
         "had", "has", "have", "her", "here", "his", "how", "into", "its", "just", "let",
         "like", "little", "make", "many", "message", "more", "most", "much", "new", "nice",
@@ -214,6 +214,7 @@ _NOT_A_SUBJECT = frozenset(
         "yes", "you", "your",
     ]
 )
+_ASSISTANT_STARTS = frozenset(["sure", "certainly", "here", "okay", "alright"])
 _SENTENCE_STOP = re.compile(r"[.!?]")
 _SENTENCE_WORDS = 3
 _PLAIN = re.compile(r"(?:[^\W_]|[\s.,!?'’:;-])*")
@@ -402,8 +403,13 @@ def write_dense(
     rng: random.Random | None = None,
     density: str = "natural",
     clock: Callable[[], float] = time.monotonic,
+    about: str | None = None,
 ) -> str:
-    """A text that opens as ``conversation`` asks and carries ``secret``."""
+    """A text that opens as ``conversation`` asks and carries ``secret``.
+
+    ``about`` names what a short text should open on, when that is not simply
+    every word of the requests (a reply steered to a new subject, say).
+    """
     rng = rng or random.SystemRandom()
     chosen = DENSITIES[density]
     asked: list[Message] = [
@@ -416,7 +422,8 @@ def write_dense(
     # making progress, is thrown away and begun again with a new opening.
     problem = "The finished text did not decode back to the secret."
     # With only a few free words at the start, they had better say what the text is about.
-    subject = _subject(conversation) if chosen.plain else frozenset()
+    said: Sequence[Message] = conversation if about is None else [{"role": "user", "content": about}]
+    subject = _subject(said) if chosen.plain else frozenset()
     # Sealed without random bytes, the same opening would give the same text
     # again: a text asked for after an earlier one must start differently.
     earlier = [flatten(m["content"]) for m in conversation if m["role"] == "assistant"]
@@ -566,7 +573,20 @@ def _closing(choices: Sequence[tuple[Option, int]]) -> int:
     return max(range(len(choices)), key=lambda at: (choices[at][0].probability, choices[at][0].token))
 
 
-def read_dense(text: str, keys: Keys, backend: Backend) -> str:
+@dataclass(frozen=True)
+class ReadProgress:
+    """How far the reader has got: the text followed so far and the bits it has given up."""
+
+    read: str
+    bits: str
+
+
+def read_dense(
+    text: str,
+    keys: Keys,
+    backend: Backend,
+    on_read: Callable[[ReadProgress], None] | None = None,
+) -> str:
     """Recover the secret from a compact-format text by replaying the model."""
     box = DenseBox(keys.dense)
     too_short = True
@@ -574,7 +594,7 @@ def read_dense(text: str, keys: Keys, backend: Backend) -> str:
     # density, so each such pair gets its own pass over the text.
     for one in _passes(text):
         try:
-            opening, steps, to_the_end = _replay(text, backend, *one)
+            opening, steps, to_the_end = _replay(text, backend, *one, _watcher(one, on_read))
         except DenseError:
             continue
         too_short = False
@@ -603,6 +623,21 @@ def read_dense(text: str, keys: Keys, backend: Backend) -> str:
 
 
 _Pass = tuple[int, tuple[Message, ...], bool]
+_Steps = list[tuple[list["Option"], int]]
+
+
+def _watcher(
+    one: _Pass, on_read: Callable[[ReadProgress], None] | None
+) -> Callable[[str, _Steps], None] | None:
+    """Reports each step of a pass, read the way the first density of that pass reads it."""
+    if on_read is None:
+        return None
+    density = next(d for d in DENSITIES.values() if _pass_of(d) == one)
+
+    def watch(written: str, steps: _Steps) -> None:
+        on_read(ReadProgress(written, _bits(steps, [shares(found, density) for found, _ in steps])))
+
+    return watch
 
 
 def _pass_of(density: Density) -> _Pass:
@@ -632,6 +667,7 @@ def _replay(
     words: int,
     continuation: tuple[Message, ...] = CONTINUE,
     plain: bool = False,
+    on_step: Callable[[str, list[tuple[list[Option], int]]], None] | None = None,
 ) -> tuple[str, list[tuple[list[Option], int]], bool]:
     """Follow the text token by token: what the model offered, and what was written.
 
@@ -658,6 +694,8 @@ def _replay(
         steps.append((found, index))
         rest = rest[len(flatten(written + token)) - len(flatten(written)) :]
         written += token
+        if on_step is not None:
+            on_step(written, steps)
     return opening, steps, not rest.strip()
 
 
@@ -771,7 +809,11 @@ def _opening(
         ends = complete_word_ends(sample)
         if len(ends) >= words:
             opening = sample[: ends[words - 1]]
-            is_plain = not plain or _PLAIN.fullmatch(opening) is not None
+            is_plain = not plain or (
+                _PLAIN.fullmatch(opening) is not None
+                # "Sure! Here is..." is a model answering a request, not a person texting.
+                and split_words(opening)[0] not in _ASSISTANT_STARTS
+            )
             is_new = not any(text.startswith(opening) for text in earlier)
             on_subject = not subject or _mentions(opening, subject)
             if is_plain and is_new and on_subject:
