@@ -568,7 +568,10 @@ class Connect(Page):
         self.keys = await asyncio.to_thread(derive_keys, password)
         try:
             if friend and not self.line.connected:
-                await self.line.call(friend)
+                await self.line.call(friend, self.keys, self.say)
+            elif not friend:
+                # From another network the friend can only come through the relay.
+                await self.line.wait(self.keys)
         except LineError as error:
             return self.say(_said(error), BAD)
         self._line_changed()
