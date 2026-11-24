@@ -222,6 +222,33 @@ def test_two_people_chat_and_each_sees_both_conversations():
     asyncio.run(scene())
 
 
+def test_two_people_on_two_hotspots_meet_through_the_relay(relay, monkeypatch):
+    monkeypatch.setenv("LLM_ENCRYPTOR_RELAY", relay.url)
+
+    async def scene():
+        ada, bo = app(), app()
+        async with ada.run_test(size=(120, 44)) as a, bo.run_test(size=(120, 44)) as b:
+            await a.press("enter")
+            await b.press("enter")
+            await until(a, lambda: ada.screen.line._server is not None)
+            ada.screen.line._server.close()  # Out of reach, as behind a phone's hotspot.
+            ada_id = str(ada.screen.query_one("#my-id").render())
+            await a.press(*"Ada", "down", *"pw", "enter")
+            await until(a, lambda: relay.posts == [] and ada.screen.line._meeting is not None)
+            await b.press(*"Bo", "down", *"pw", "down", *ada_id, "enter")
+            await until(a, lambda: isinstance(ada.screen, Chat) and isinstance(bo.screen, Chat))
+            assert bo.screen.line.relayed and ada.screen.line.relayed
+            await b.pause(0.1)
+            assert "● Bo" in status(ada) and "● Ada" in status(bo)
+            await a.press(*"meet at noon", "enter")
+            turns = lambda running: list(running.screen.query(Turn))
+            await until(b, lambda: turns(bo) and turns(bo)[-1].secret == "meet at noon")
+            await b.press("escape", "escape")
+            await until(a, lambda: "Bo left" in status(ada))
+
+    asyncio.run(scene())
+
+
 def test_a_text_hidden_with_another_password_shows_as_unreadable():
     async def scene():
         running = app()
@@ -281,7 +308,7 @@ def test_chat_warns_when_the_two_use_different_models():
         running = app()
         async with running.run_test(size=(120, 44)) as pilot:
             line = tui.Line("Me", print, model="toy")
-            line.friend, line.friend_model, line._writer = "Bo", "big:7", object()
+            line.friend, line.friend_model, line._link = "Bo", "big:7", object()
             chat = Chat(line, derive_keys("pw"), [])
             await running.push_screen(chat)
             await pilot.pause(0.1)
@@ -289,6 +316,6 @@ def test_chat_warns_when_the_two_use_different_models():
             line.friend_model = "toy"
             chat.line_changed()
             assert "≠" not in status(running) and "● Bo" in status(running)
-            line._writer = None
+            line._link = None
 
     asyncio.run(scene())

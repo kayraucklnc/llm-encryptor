@@ -17,8 +17,19 @@ your secret, the locked bits, and the visible text.
 
 Both of you open the app and choose Chat. One reads out the ID on the screen
 (ten letters and digits); the other types it. Both type the password you
-agreed on. There is no server: the ID is the first computer's address, so it
-works on the same network or over a VPN.
+agreed on, and the one waiting presses Enter with the friend's ID left empty.
+
+The ID is the waiting computer's address, so on the same network (or a VPN)
+the two connect directly. On different networks, such as two phone hotspots
+or two homes, neither computer can be reached from outside, so after a few
+seconds the app meets through a public relay instead
+([ntfy.sh](https://ntfy.sh), no account). The place you meet there comes from
+the password and the ID together, so a wrong password shows up as "Nobody
+answers", and everything sent through it is encrypted with a key from the
+password: the relay sees when and how much you send, and both your IP
+addresses, but not the texts, your names or the model. Set
+`$LLM_ENCRYPTOR_RELAY` to use your own ntfy server, or to `off` for direct
+connections only. Both of you need this version of the app for the relay.
 
 The first message sets the topic of the visible chat ("dinner on Friday").
 After that every visible text is written as a reply to the one before, so
@@ -284,6 +295,9 @@ breaks, so "smart quotes" or autocorrect on the way will break it.
   Two compact texts with the same password, the same first 16 words and the
   same 2 random bytes would leak how their secrets differ; that needs a
   1-in-65,536 coincidence on top of an identical opening.
+- **Chats on different networks go through ntfy.sh**, which keeps each
+  (encrypted) post for up to 12 hours and sees both IP addresses and when you
+  write. Run your own ntfy server, or connect over a VPN, if that matters.
 - Not audited. Do not rely on it where being caught has serious consequences.
 
 ## Other runtimes
